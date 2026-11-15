@@ -55,6 +55,10 @@ type Result struct {
 	Samples    []Sample `json:"samples,omitempty"`
 	SkipReason string   `json:"skip_reason,omitempty"`
 
+	// 下载测速结果，0 表示没测或测不出。
+	SpeedMBps  float64 `json:"speed_mbps,omitempty"`
+	SpeedBytes int64   `json:"speed_bytes,omitempty"`
+
 	Node    sub.Proxy    `json:"-"`
 	Dialer  proxy.Dialer `json:"-"`
 	healthy bool
@@ -306,7 +310,8 @@ func finalize(r *Result) {
 }
 
 // Rank 返回按质量排序的可用节点（指针，指向原切片元素，便于回写复测结果）。
-// 排序原则：稳定性优先（成功率降序），其次平均延迟升序。
+// 排序原则：稳定性优先（成功率降序），其次下载吞吐降序，最后平均延迟升序。
+// 没做测速时吞吐全为 0，退化成「成功率 + 延迟」两级排序。
 func Rank(results []Result, healthyOnly bool) []*Result {
 	out := make([]*Result, 0, len(results))
 	for i := range results {
@@ -319,14 +324,21 @@ func Rank(results []Result, healthyOnly bool) []*Result {
 		out = append(out, &results[i])
 	}
 	sort.SliceStable(out, func(i, j int) bool {
-		si := successRate(*out[i])
-		sj := successRate(*out[j])
-		if si != sj {
-			return si > sj
-		}
-		return out[i].AvgLatency < out[j].AvgLatency
+		return betterThan(*out[i], *out[j])
 	})
 	return out
+}
+
+// betterThan 是节点质量比较的唯一口径，复测与挑选都复用它，避免两处排序不一致。
+func betterThan(a, b Result) bool {
+	ra, rb := successRate(a), successRate(b)
+	if ra != rb {
+		return ra > rb
+	}
+	if a.SpeedMBps != b.SpeedMBps {
+		return a.SpeedMBps > b.SpeedMBps
+	}
+	return a.AvgLatency < b.AvgLatency
 }
 
 func successRate(r Result) float64 {
@@ -426,11 +438,7 @@ func Select(ranked []*Result, topN int, capRatio float64) []*Result {
 	}
 
 	sort.SliceStable(picked, func(i, j int) bool {
-		si, sj := successRate(*picked[i]), successRate(*picked[j])
-		if si != sj {
-			return si > sj
-		}
-		return picked[i].AvgLatency < picked[j].AvgLatency
+		return betterThan(*picked[i], *picked[j])
 	})
 	if len(picked) > topN {
 		picked = picked[:topN]

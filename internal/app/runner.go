@@ -86,6 +86,15 @@ func (r *runner) refresh(ctx context.Context) error {
 		probe.Refine(ctx, results, r.cfg.TopN*2, r.cfg.RefineRounds, opts, r.log)
 	}
 
+	// 复测之后再测速：只对已确认能连通的节点拉数据，省带宽也省时间。
+	if r.cfg.Speedtest && r.cfg.TopN > 0 {
+		probe.Speedtest(ctx, results, r.cfg.TopN*2, probe.SpeedOptions{
+			URL:         r.cfg.SpeedtestURL,
+			Timeout:     r.cfg.SpeedtestTimeout.Std(),
+			Concurrency: r.cfg.SpeedtestConcurrency,
+		}, r.log)
+	}
+
 	ranked := probe.Rank(results, true)
 	available := len(ranked)
 
@@ -178,6 +187,7 @@ func (r *runner) refresh(ctx context.Context) error {
 			"排名", i+1,
 			"名称", item.Name,
 			"协议", item.Type,
+			"能效", fmt.Sprintf("%.2fMB/s", item.SpeedMBps),
 			"平均延迟", fmt.Sprintf("%dms", item.AvgLatency),
 			"成功率", fmt.Sprintf("%d/%d", item.Success, item.Success+item.Fail))
 	}

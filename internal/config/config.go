@@ -84,6 +84,14 @@ type Config struct {
 	// 避免规模大的订阅把名额占满、其它来源的可用节点被截断。填 1 表示不做限制。
 	SourceCapRatio float64 `yaml:"source_cap_ratio"`
 
+	// 下载测速：对候选节点在隧道内实拉一段数据，按吞吐排序。
+	// 延迟只反映握手开销，和带宽没有必然关系，免费节点里常见「延迟高但速度好」。
+	Speedtest        bool     `yaml:"speedtest"`
+	SpeedtestURL     string   `yaml:"speedtest_url"`
+	SpeedtestTimeout Duration `yaml:"speedtest_timeout"`
+	// SpeedtestConcurrency 是同时测速的节点数，太大会互相抢带宽、把结果压低。
+	SpeedtestConcurrency int `yaml:"speedtest_concurrency"`
+
 	// Include / Exclude 按节点名关键字过滤。
 	Include []string `yaml:"include"`
 	Exclude []string `yaml:"exclude"`
@@ -105,25 +113,29 @@ type Config struct {
 // Default 返回一份可直接运行的默认配置。
 func Default() Config {
 	return Config{
-		Subscriptions:      nil,
-		SiteButton:         "复制精选订阅",
-		ArticleLimit:       1,
-		ArticleMaxSubs:     100,
-		ArticleConcurrency: 8,
-		MaxNodes:           0,
-		ProbeURL:           "https://www.gstatic.com/generate_204",
-		PreTimeout:         Duration(2 * time.Second),
-		ProbeTimeout:       Duration(6 * time.Second),
-		PreConcurrency:     256,
-		Concurrency:        96,
-		Rounds:             1,
-		RefineRounds:       3,
-		TopN:               30,
-		SourceCapRatio:     0.5,
-		OutputDir:          "out",
-		Interval:           Duration(30 * time.Minute),
-		PerRegionGroups:    6,
-		Insecure:           true,
+		Subscriptions:        nil,
+		SiteButton:           "复制精选订阅",
+		ArticleLimit:         1,
+		ArticleMaxSubs:       100,
+		ArticleConcurrency:   8,
+		MaxNodes:             0,
+		ProbeURL:             "https://www.gstatic.com/generate_204",
+		PreTimeout:           Duration(2 * time.Second),
+		ProbeTimeout:         Duration(6 * time.Second),
+		PreConcurrency:       256,
+		Concurrency:          96,
+		Rounds:               1,
+		RefineRounds:         3,
+		TopN:                 30,
+		SourceCapRatio:       0.5,
+		Speedtest:            true,
+		SpeedtestURL:         "https://speed.cloudflare.com/__down?bytes=2000000",
+		SpeedtestTimeout:     Duration(5 * time.Second),
+		SpeedtestConcurrency: 6,
+		OutputDir:            "out",
+		Interval:             Duration(30 * time.Minute),
+		PerRegionGroups:      6,
+		Insecure:             true,
 	}
 }
 
