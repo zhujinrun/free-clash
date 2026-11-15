@@ -3,6 +3,7 @@ package config
 
 import (
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -22,6 +23,23 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 	}
 	*d = Duration(v)
 	return nil
+}
+
+// MarshalYAML 保证写出的配置是 "30m" 这样的可读形式，而不是纳秒整数。
+func (d Duration) MarshalYAML() (any, error) {
+	v := time.Duration(d)
+	if v == 0 {
+		return "0s", nil
+	}
+	// Go 的 String() 会把整分钟写成 "30m0s"、整小时写成 "1h0m0s"，去掉多余的零。
+	s := v.String()
+	switch {
+	case strings.HasSuffix(s, "h0m0s"):
+		s = s[:len(s)-4]
+	case strings.HasSuffix(s, "m0s"):
+		s = s[:len(s)-2]
+	}
+	return s, nil
 }
 
 func (d Duration) Std() time.Duration { return time.Duration(d) }
@@ -61,6 +79,10 @@ type Config struct {
 	ServeAddr       string   `yaml:"serve_addr"`
 	Interval        Duration `yaml:"interval"`
 	PerRegionGroups int      `yaml:"per_region_groups"`
+
+	// LogFile 日志文件路径。留空时：服务模式写 <配置目录>/logs/freeclash.log，
+	// 前台模式输出到终端。服务模式必须落盘，因为系统服务没有终端可看。
+	LogFile string `yaml:"log_file"`
 
 	// Insecure 忽略节点侧 TLS 证书错误（免费节点常见自签证书）。
 	Insecure bool `yaml:"insecure"`

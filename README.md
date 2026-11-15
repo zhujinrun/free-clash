@@ -65,6 +65,52 @@ go build -ldflags "-s -w" -o freeclash.exe .
 
 首次运行会拉取订阅并对全部节点做探测，耗时取决于节点数量与并发配置。4000 个节点、默认并发下约需 2–3 分钟。
 
+## 安装为系统服务
+
+常驻巡检适合交给系统服务管理器托管：开机自启、崩溃自动重启、退出登录也不影响。
+
+```bash
+# 编译当前平台的二进制
+make dev          # 产出 dist/freeclash（Windows 为 freeclash.exe）
+
+# 安装为服务并启动（Windows 需管理员终端，Linux 需 sudo）
+dist/freeclash install -site https://freeclash.zhaotizi.best/
+
+# 查看状态
+dist/freeclash status
+
+# 停止 / 卸载
+dist/freeclash stop
+dist/freeclash uninstall
+```
+
+`install` 做了三件事：
+
+1. **确保有配置**。找不到 `config.yaml` 时，如果命令行给了 `-site` 或 `-url`，会按可执行文件所在目录生成一份默认配置再继续；两者都没给则直接报错，避免装出一个必然失败的 service。
+2. **校验能常驻**。服务模式下 `interval` 必须大于 0，或配置了 `serve_addr`，否则进程跑完一轮就退出，服务会立刻变为已停止。
+3. **注册并启动**。Windows 注册为自动（延迟启动）服务，并设置失败重启；systemd 生成 unit 文件并 `Restart=always`。
+
+Windows 上注册的服务名是 `freeclash`，可用 `sc query freeclash` 查看；Linux 上生成 `/etc/systemd/system/freeclash.service`，也可用 `systemctl status freeclash` 管理。
+
+### 路径怎么定的
+
+服务运行时的工作目录不可信（Windows 会把它设成 `system32`），因此所有相对路径都以**配置文件所在目录**为基准：
+
+- 配置查找顺序：`-config` 指定 → 可执行文件旁的 `config.yaml` → 当前目录的 `config.yaml`
+- `output_dir`、`log_file` 及本地订阅文件路径都相对配置文件目录展开
+- 服务定义里会写入 `-config <绝对路径>`，装完再改配置也能被读到
+
+### 日志
+
+服务模式没有终端，日志写入 `<配置目录>/logs/freeclash.log`，单文件超过 10MB 自动轮转，保留 5 份（最多约 50MB）。前台运行时日志直接打在终端上；配置了 `log_file` 则同时写文件。路径可用 `-log` 或配置项 `log_file` 覆盖。
+
+```bash
+# Windows
+type logs\freeclash.log
+# Linux / macOS
+tail -f logs/freeclash.log
+```
+
 ## 自动解析精选订阅
 
 公司的分享站点需要手动点「复制精选订阅」才能拿到地址。配置 `site` 后，程序自己去页面取，不必再手工操作。
@@ -105,18 +151,33 @@ http://127.0.0.1:9898/best.yaml
 
 ## 命令行参数
 
+### 服务命令
+
+| 命令 | 说明 |
+|---|---|
+| `install` | 安装为系统服务并启动，可附带下面任意参数 |
+| `uninstall` | 停止并卸载服务 |
+| `start` / `stop` / `restart` | 控制已安装的服务 |
+| `status` | 查看服务状态与配置路径 |
+| `run` | 前台运行，等价于不带命令 |
+| `init-config` | 在可执行文件旁生成默认配置文件 |
+| `version` | 打印版本号 |
+
+### 运行参数
+
 | 参数 | 说明 |
 |---|---|
 | `-site` | 分享站点首页地址，自动解析精选订阅 |
 | `-button` | 页面上「复制精选订阅」按钮的文案，用于定位订阅地址 |
 | `-resolve` | 只解析并打印订阅地址，不执行探测 |
 | `-url` | 订阅地址，多个用逗号分隔 |
-| `-config` | YAML 配置文件路径 |
+| `-config` | YAML 配置文件路径，默认自动查找 |
 | `-once` | 只探测一次后退出 |
 | `-interval` | 定时探测间隔，如 `30m` |
 | `-top` | 输出节点数量，默认 30 |
 | `-serve` | 本地订阅服务监听地址，如 `:9898` |
 | `-out` | 输出目录，默认 `out` |
+| `-log` | 日志文件路径 |
 | `-concurrency` | 真实探测并发，默认 96 |
 | `-v` | 输出详细日志 |
 | `-version` | 打印版本号 |
@@ -183,9 +244,12 @@ SS_SERVER_BIN=/path/to/go-shadowsocks2 go test ./internal/proxy -run TestSSLoopb
 
 ```
 freeclash/
-├── main.go                  入口、定时循环、结果落盘
+├── main.go                  入口、子命令（服务管理）、参数解析
 ├── internal/
-│   ├── config/              配置结构与 YAML 加载
+│   ├── app/                 一次完整运行：日志、定时循环、结果落盘
+│   ├── svc/                 系统服务封装（Windows SCM / systemd / launchd）
+│   ├── logx/                带大小轮转的文件日志
+│   ├── config/              配置结构、YAML 加载、路径解析
 │   ├── proxy/               协议客户端
 │   │   ├── proxy.go         Dialer 接口、地址编码、工厂
 │   │   ├── ss.go            Shadowsocks（AEAD + 流加密）
@@ -196,5 +260,6 @@ freeclash/
 │   ├── site/                从分享站点页面解析精选订阅地址
 │   ├── probe/               TCP 预筛、隧道探测、排序
 │   └── server/              本地 HTTP 订阅服务
+├── Makefile                 构建与安装脚本
 └── config.example.yaml
 ```
