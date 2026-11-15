@@ -103,7 +103,7 @@ func Default() Config {
 	return Config{
 		Subscriptions:      nil,
 		SiteButton:         "复制精选订阅",
-		ArticleLimit:       2,
+		ArticleLimit:       1,
 		ArticleMaxSubs:     100,
 		ArticleConcurrency: 8,
 		MaxNodes:           0,

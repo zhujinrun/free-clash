@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -194,5 +196,95 @@ func TestIsPlausibleSub(t *testing.T) {
 		if !isPlausibleSub(mustParse(t, u), base) {
 			t.Errorf("%s 应被保留", u)
 		}
+	}
+}
+
+// 首页除了节点文章，还挂着客户端教程（/posts/manual/...）。这些页面里的
+// 链接是示例和推广，混进候选只会白拉一遍——尤其当 /nodes 列表页超时、
+// 只能靠首页兜底的时候。
+func TestArticleLinksSkipTutorials(t *testing.T) {
+	var listHits int32
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<html><body>
+<a href="/posts/auto/2026-11-15-free-clash-nodes">查看节点文章 →</a>
+<a href="/nodes">免费节点</a>
+<a href="/posts/manual/clashbox-complete-guide">ClashBox 教程</a>
+<a href="/posts/manual/v2rayng-complete-guide">v2rayNG 教程</a>
+</body></html>`)
+	})
+	mux.HandleFunc("/nodes", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&listHits, 1)
+		fmt.Fprint(w, `<html><body>
+<a href="/posts/auto/2026-11-14-free-clash-nodes">11-14</a>
+<a href="/posts/auto/2026-11-13-free-clash-nodes">11-13</a>
+<a href="/posts/manual/streisand-complete-guide">教程</a>
+</body></html>`)
+	})
+	for _, p := range []string{"2026-11-15", "2026-11-14", "2026-11-13"} {
+		date := p
+		mux.HandleFunc("/posts/auto/"+date+"-free-clash-nodes", func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, `<html><body><div class="copy-box"><code>https://sub.example.com/%s.txt</code></div></body></html>`, date)
+		})
+	}
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	r := newTestResolver()
+	src, err := r.ArticleSubscriptions(context.Background(), srv.URL, 3, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(src.Articles) != 3 {
+		t.Fatalf("文章数 = %d want 3: %v", len(src.Articles), src.Articles)
+	}
+	for _, u := range src.Articles {
+		if strings.Contains(u, "/posts/manual/") {
+			t.Errorf("教程文章不应进入候选: %s", u)
+		}
+	}
+	// 入口命中的那篇必须排第一。
+	if !strings.HasSuffix(src.Articles[0], "/posts/auto/2026-11-15-free-clash-nodes") {
+		t.Errorf("首篇应是入口指向的当天文章，实际 %v", src.Articles)
+	}
+
+	// 只跟一篇时不应再请求列表页。
+	atomic.StoreInt32(&listHits, 0)
+	if _, err := r.ArticleSubscriptions(context.Background(), srv.URL, 1, 0); err != nil {
+		t.Fatal(err)
+	}
+	if n := atomic.LoadInt32(&listHits); n != 0 {
+		t.Errorf("article_limit=1 时不应抓取 /nodes，实际请求 %d 次", n)
+	}
+}
+
+// 入口指向的文章路径里可能没有日期，此时按日期排序会把它压到后面。
+func TestArticleLinksAnchorFirst(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<html><body>
+<a href="/posts/latest">查看节点文章 →</a>
+<a href="/nodes">免费节点</a>
+</body></html>`)
+	})
+	mux.HandleFunc("/nodes", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<html><body>
+<a href="/posts/auto/2026-11-14-free-clash-nodes">11-14</a>
+</body></html>`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	r := newTestResolver()
+	src, err := r.ArticleSubscriptions(context.Background(), srv.URL, 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(src.Articles) != 2 {
+		t.Fatalf("文章数 = %d want 2: %v", len(src.Articles), src.Articles)
+	}
+	if src.Articles[0] != srv.URL+"/posts/latest" {
+		t.Errorf("无日期的入口应排第一，实际 %v", src.Articles)
 	}
 }

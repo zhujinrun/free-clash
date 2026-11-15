@@ -11,17 +11,19 @@ import (
 	"sync"
 )
 
-// 站点首页的「查看节点文章」会把读者带到一个每日汇总页，页面里挂着几十条
+// 站点首页的「查看节点文章」会指向当天那篇每日汇总，页面里挂着几十条
 // 「通用订阅」。这些订阅才是节点数量的大头（单篇可达数万节点），而首页那个
 // 「精选订阅」只是其中一份。
 //
 // 这里的做法是：首页找文章入口 → 跟进最近若干篇 → 从每篇里抽出订阅地址。
 // 抽取出自固定的卡片结构（<div class="copy-box"><code>URL</code>），因此不会
 // 把页面里的推广、教程、返佣链接带进来。
+//
+// 关于篇数：往期文章里的订阅是当天的免费节点集合，隔天基本就失效了，多抓
+// 的边际收益很低（实测 1 篇 31 个可用，3 篇 41 个，但耗时翻倍）。所以默认
+// 只跟当天这一篇，article_limit 留作可调。
 
 const (
-	// defaultArticleLimit 是默认跟进的最近文章篇数。
-	defaultArticleLimit = 2
 	// maxArticleFetch 是文章页的抓取并发。
 	articleFetchParallel = 3
 	// maxArticleBytes 限制单篇文章体积。
@@ -77,7 +79,7 @@ func (r *Resolver) ArticleSubscriptions(ctx context.Context, homepage string, ar
 		return nil, fmt.Errorf("首页地址无效: %w", perr)
 	}
 
-	articles := r.articleLinks(ctx, body, base)
+	articles := r.articleLinks(ctx, body, base, articleLimit)
 	if len(articles) > articleLimit {
 		articles = articles[:articleLimit]
 	}
@@ -89,34 +91,48 @@ func (r *Resolver) ArticleSubscriptions(ctx context.Context, homepage string, ar
 	return &ArticleSources{Articles: articles, Subs: subs}, nil
 }
 
-// articleLinks 从首页（必要时加上 /nodes 列表页）收集文章地址，按日期倒序。
-func (r *Resolver) articleLinks(ctx context.Context, homeBody []byte, base *url.URL) []string {
+// articleLinks 从首页（必要时加上 /nodes 列表页）收集文章地址。
+// 「查看节点文章」命中的那篇排最前，其余只补充节点文章形态的往期。
+func (r *Resolver) articleLinks(ctx context.Context, homeBody []byte, base *url.URL, limit int) []string {
 	text := html.UnescapeString(string(homeBody))
 
-	// 「查看节点文章」这类入口优先，其余 /posts/ 链接作为补充。
-	var priority []string
+	// primary：「查看节点文章」这类入口，站点用它指向当天最新的那篇。
+	// 文案特征对导航项也可能命中（/nodes 的标题就是「免费节点」），
+	// 所以还要过一遍文章形态判断。
+	var primary []string
 	for _, m := range anchorRe.FindAllStringSubmatch(text, -1) {
 		label := strings.TrimSpace(tagRe.ReplaceAllString(m[2], ""))
 		if !containsAny(label, articleTextHints) {
 			continue
 		}
-		if abs := resolveRef(base, m[1]); abs != "" {
-			priority = append(priority, abs)
+		abs := resolveRef(base, m[1])
+		if abs != "" && isNodeArticle(abs) {
+			primary = append(primary, abs)
 		}
 	}
-	for _, m := range postsHrefRe.FindAllStringSubmatch(text, -1) {
-		if abs := resolveRef(base, m[1]); abs != "" {
-			priority = append(priority, abs)
-		}
+	primary = mergeUnique(primary)
+
+	// 只跟一篇时不必再碰列表页：首页的入口就是当天那篇。列表页本身
+	// 不稳定（实测约三分之一概率超时），能省一次请求就省。
+	if limit > 0 && len(primary) >= limit {
+		return primary[:limit]
 	}
 
-	// 列表页通常一次列出全部往期文章，能补齐首页只显示的入口。
+	// secondary：首页与列表页里的其它文章。这里必须按「节点文章」过滤——
+	// 首页同时挂着客户端教程（/posts/manual/...），那些页面里的链接是示例
+	// 和推广，混进来只会白拉一遍。
+	var secondary []string
+	for _, m := range postsHrefRe.FindAllStringSubmatch(text, -1) {
+		if abs := resolveRef(base, m[1]); abs != "" && isNodeArticle(abs) {
+			secondary = append(secondary, abs)
+		}
+	}
 	if listURL := resolveRef(base, "/nodes"); listURL != "" {
 		if body, ctype, _, err := r.get(ctx, listURL, maxArticleBytes, true, pageTimeout); err == nil && isHTML(body, ctype) {
 			listText := html.UnescapeString(string(body))
 			for _, m := range postsHrefRe.FindAllStringSubmatch(listText, -1) {
-				if abs := resolveRef(base, m[1]); abs != "" {
-					priority = append(priority, abs)
+				if abs := resolveRef(base, m[1]); abs != "" && isNodeArticle(abs) {
+					secondary = append(secondary, abs)
 				}
 			}
 		} else if err != nil {
@@ -124,7 +140,43 @@ func (r *Resolver) articleLinks(ctx context.Context, homeBody []byte, base *url.
 		}
 	}
 
-	return sortArticles(priority)
+	// 入口命中的那篇不受日期排序影响：站点把它当作「最新」的指路，
+	// 路径里未必带得出日期，按日期排会把它压到后面。
+	return mergeUnique(primary, sortArticles(secondary))
+}
+
+// isNodeArticle 判断地址是否属于「每日节点汇总」类文章。要满足两点：
+// 在 /posts/ 下（排除 /nodes 这个列表页，它的导航文案也叫「免费节点」，
+// 很容易被入口文案匹配到），且不是客户端教程页。
+func isNodeArticle(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	p := strings.ToLower(u.Path)
+	if !strings.Contains(p, "/posts/") {
+		return false
+	}
+	if strings.Contains(p, "/manual/") || strings.Contains(p, "guide") || strings.Contains(p, "tutorial") {
+		return false
+	}
+	return true
+}
+
+// mergeUnique 按序拼接并去重，保留先出现的那个。
+func mergeUnique(groups ...[]string) []string {
+	var out []string
+	seen := make(map[string]struct{}, 32)
+	for _, g := range groups {
+		for _, u := range g {
+			if _, dup := seen[u]; dup {
+				continue
+			}
+			seen[u] = struct{}{}
+			out = append(out, u)
+		}
+	}
+	return out
 }
 
 // collectArticleSubs 并行抓取文章页并抽取订阅地址。
