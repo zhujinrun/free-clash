@@ -84,6 +84,8 @@ dist/freeclash stop
 dist/freeclash uninstall
 ```
 
+构建默认用 UPX 压缩（约 8.1MB → 2.9MB），没装 upx 会自动跳过，macOS 二进制不支持压缩。若杀软对压缩过的服务端二进制误报，用 `make dev NO_UPX=1` 重新构建。
+
 `install` 做了三件事：
 
 1. **确保有配置**。找不到 `config.yaml` 时，如果命令行给了 `-site` 或 `-url`，会按可执行文件所在目录生成一份默认配置再继续；两者都没给则直接报错，避免装出一个必然失败的 service。
