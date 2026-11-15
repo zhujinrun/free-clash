@@ -28,6 +28,14 @@ func (d Duration) Std() time.Duration { return time.Duration(d) }
 
 // Config 是完整的运行配置。
 type Config struct {
+	// Site 是分享站点首页地址。配置后程序会自动从页面解析出订阅地址，
+	// 无需再手动「复制精选订阅」。Subscriptions 可与它并用，结果会合并去重。
+	Site string `yaml:"site"`
+
+	// SiteButton 是页面上「复制精选订阅」按钮的文案。解析器用它定位按钮
+	// 所在的 JS 模块，再在模块内提取订阅地址；站点改文案时调整此项即可。
+	SiteButton string `yaml:"site_button"`
+
 	// 订阅来源，支持 http(s) 与本地文件，可填多个。
 	Subscriptions []string `yaml:"subscriptions"`
 
@@ -62,6 +70,7 @@ type Config struct {
 func Default() Config {
 	return Config{
 		Subscriptions:   nil,
+		SiteButton:      "复制精选订阅",
 		ProbeURL:        "https://www.gstatic.com/generate_204",
 		PreTimeout:      Duration(2 * time.Second),
 		ProbeTimeout:    Duration(6 * time.Second),

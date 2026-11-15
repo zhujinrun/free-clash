@@ -1,11 +1,19 @@
 # freeclash 配置示例
 # 保存为 config.yaml 后，用 freeclash -config config.yaml 启动
-# 命令行参数（-url / -top / -interval / -serve / -out / -concurrency）会覆盖此处同名配置
+# 命令行参数（-site / -button / -url / -top / -interval / -serve / -out / -concurrency）会覆盖此处同名配置
+
+# 分享站点首页。配置后程序会自己从页面解析出「精选订阅」地址，
+# 不必再手动点网页上的「复制精选订阅」。需要与 subscriptions 二选一或同时使用。
+site: https://freeclash.zhaotizi.best/
+
+# 页面上那个按钮的文案，用于定位订阅地址所在的 JS 模块。
+# 站点改文案时改这里即可。
+site_button: 复制精选订阅
 
 # 订阅来源。可填多个，支持 http(s) 与本地文件路径。
-# 任一源拉取失败不影响其他源；全部失败时会回退到 output_dir 下的缓存。
-subscriptions:
-  - https://clashnodefree.com/sub/clash.yml
+# 与 site 同时配置时结果会合并去重；任一源失败不影响其他源；
+# 全部失败时回退到上次解析出的地址，再失败则用 output_dir 下的缓存。
+subscriptions: []
 
 # 探测目标。该地址需返回 200 或 204，建议使用境外站点，
 # 这样一次请求即可同时验证 DNS、TLS 与出境链路是否真正可用。

@@ -47,17 +47,46 @@
 ## 快速开始
 
 ```bash
-# 单次探测，输出到 out/
-go run . -url https://clashnodefree.com/sub/clash.yml -once
+# 从分享站点自动解析精选订阅，然后单次探测
+go run . -site https://freeclash.zhaotizi.best/ -once
 
 # 常驻运行：每 30 分钟巡检一次，并在 :9898 提供订阅服务
-go run . -url https://clashnodefree.com/sub/clash.yml -serve :9898 -interval 30m
+go run . -site https://freeclash.zhaotizi.best/ -serve :9898 -interval 30m
+
+# 只想看当前解析到的订阅地址
+go run . -site https://freeclash.zhaotizi.best/ -resolve
+
+# 直接给订阅地址（跳过页面解析）
+go run . -url https://clashnodefree.com/sub/clash.yml -once
 
 # 编译为单文件
 go build -ldflags "-s -w" -o freeclash.exe .
 ```
 
 首次运行会拉取订阅并对全部节点做探测，耗时取决于节点数量与并发配置。4000 个节点、默认并发下约需 2–3 分钟。
+
+## 自动解析精选订阅
+
+公司的分享站点需要手动点「复制精选订阅」才能拿到地址。配置 `site` 后，程序自己去页面取，不必再手工操作。
+
+**为什么不能直接匹配按钮。** 页面上那个按钮是 `<button type="button">复制精选订阅</button>`，没有 `data-clipboard-text` 之类的属性，地址是点击时由 JS 从数据对象里取的；地址本身也不在 HTML 里，而是编译进带内容哈希的 JS chunk（如 `theme.BdP30UdW.js`），站点重新构建后文件名就会变，因此无法硬编码。
+
+**实际做法**分三步：
+
+1. **动态发现资源**：抓首页，解析出它引用的全部 JS（文件名随构建变化，所以每次现算）；
+2. **按按钮锚定**：用按钮文案（默认「复制精选订阅」，可用 `site_button` 改）找出按钮所在的 JS 模块，再只在模块内找 `subscription:` 形式的赋值。按钮与地址同处一个模块，这一步能排除页面里的大量推广与返佣链接；
+3. **实测验证**：候选地址逐个真实拉取，能被 Clash 解析出节点才算命中。
+
+打分只是排序手段，最终判据是第 3 步。实测该站点上目标地址得分 240（`按钮模块内订阅赋值` + `订阅后缀`），而 13 个干扰链接远低于它。
+
+失败时有三级兜底：上次解析出的地址 → `out/last-sub.yaml` → 报错并保持上一轮的订阅服务可用。
+
+```bash
+# 页面改版或按钮文案变了，可临时覆盖
+go run . -site https://freeclash.zhaotizi.best/ -button "复制订阅" -resolve -v
+```
+
+`-v` 会打印候选地址的分数与命中依据，页面改版时用它定位问题最直接。
 
 ## 接入 Clash
 
@@ -78,6 +107,9 @@ http://127.0.0.1:9898/best.yaml
 
 | 参数 | 说明 |
 |---|---|
+| `-site` | 分享站点首页地址，自动解析精选订阅 |
+| `-button` | 页面上「复制精选订阅」按钮的文案，用于定位订阅地址 |
+| `-resolve` | 只解析并打印订阅地址，不执行探测 |
 | `-url` | 订阅地址，多个用逗号分隔 |
 | `-config` | YAML 配置文件路径 |
 | `-once` | 只探测一次后退出 |
@@ -89,7 +121,7 @@ http://127.0.0.1:9898/best.yaml
 | `-v` | 输出详细日志 |
 | `-version` | 打印版本号 |
 
-完整配置项见 `config.example.yaml`。
+完整配置项见 `config.example.yaml`。程序默认遵循 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` 环境变量，需要经代理访问时无需额外配置。
 
 ## 输出产物
 
@@ -98,6 +130,7 @@ http://127.0.0.1:9898/best.yaml
 | `out/best.yaml` | 可直接导入 Clash 的精简配置，仅含入选节点 |
 | `out/report.json` | 全部节点的逐次探测明细，含失败原因，用于排查 |
 | `out/last-sub.yaml` | 最近一次成功拉取的完整节点列表，订阅站不可用时作为兜底缓存 |
+| `out/resolved.json` | 最近一次从页面解析出的订阅地址，页面改版或站点临时不可用时作为兜底 |
 
 `report.json` 中每条记录包含 `success`、`fail`、`avg_latency_ms`、`samples`（每轮的延迟或错误信息）以及 `skip_reason`（协议不支持等）。整轮零可用时会自动汇总失败原因分布，便于判断是订阅质量问题还是程序问题。
 
@@ -160,6 +193,7 @@ freeclash/
 │   │   ├── vmess.go         VMess AEAD + chunk stream
 │   │   └── ws.go            WebSocket 客户端（RFC 6455 子集）
 │   ├── sub/                 订阅拉取、解析、过滤、配置生成
+│   ├── site/                从分享站点页面解析精选订阅地址
 │   ├── probe/               TCP 预筛、隧道探测、排序
 │   └── server/              本地 HTTP 订阅服务
 └── config.example.yaml
