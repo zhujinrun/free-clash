@@ -1,0 +1,56 @@
+# ===== 编译产物 =====
+/freeclash
+/freeclash.exe
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# ===== 运行产物 =====
+# 输出目录内含真实订阅节点凭证，禁止入库
+/out/
+/out-*/
+/dist/
+
+# 运行日志
+*.log
+logs/
+
+# ===== 本地配置 =====
+# 真实配置可能含订阅地址与凭证；示例配置 config.example.yaml 需要入库
+/config.yaml
+/config.yml
+*.local.yaml
+
+# ===== 测试样本 =====
+# 从真实订阅抽取，含节点凭证
+/sample-test.yaml
+/sample-*.yaml
+/testdata/real-*.yaml
+
+# ===== 工具链本地状态 =====
+.workbuddy/
+
+# ===== 编辑器 / 系统 =====
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Windows
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+
+# macOS
+.DS_Store
+._*
+
+# ===== 其他 =====
+.env
+.env.*
+*.prof
+coverage.txt

@@ -1,0 +1,47 @@
+# freeclash 配置示例
+# 保存为 config.yaml 后，用 freeclash -config config.yaml 启动
+# 命令行参数（-url / -top / -interval / -serve / -out / -concurrency）会覆盖此处同名配置
+
+# 订阅来源。可填多个，支持 http(s) 与本地文件路径。
+# 任一源拉取失败不影响其他源；全部失败时会回退到 output_dir 下的缓存。
+subscriptions:
+  - https://clashnodefree.com/sub/clash.yml
+
+# 探测目标。该地址需返回 200 或 204，建议使用境外站点，
+# 这样一次请求即可同时验证 DNS、TLS 与出境链路是否真正可用。
+probe_url: https://www.gstatic.com/generate_204
+
+# ---- 时间与并发 ----
+# TCP 预筛超时：只做三次握手，足够淘汰不可达节点
+pre_timeout: 2s
+# 单个节点的完整探测超时（建连 + 协议握手 + 境外 TLS + HTTP 往返）
+probe_timeout: 6s
+# 预筛并发与探测并发
+pre_concurrency: 256
+concurrency: 96
+
+# ---- 采样策略 ----
+# 全部节点的初测轮数。1 轮最快；网络抖动大时可设为 2。
+rounds: 1
+# 对排名靠前的候选（前 top_n*2 个）追加的复测轮数，用于压低延迟噪声
+refine_rounds: 3
+# 最终输出到订阅文件中的节点数量
+top_n: 30
+
+# ---- 过滤 ----
+# 只保留名称命中这些关键字的节点（留空表示不限制）
+include: []
+# 排除名称命中这些关键字的节点，例如 ["RELAY", "过期"]
+exclude: []
+
+# ---- 输出 ----
+output_dir: out
+# 开启本地订阅服务后，把 Clash 订阅地址填成 http://127.0.0.1:9898/best.yaml 即可
+serve_addr: ":9898"
+# 定时探测间隔。设为 0 表示只执行一次
+interval: 30m
+# 按地区生成测速分组的最大数量，0 表示不生成地区分组
+per_region_groups: 6
+
+# 忽略节点侧 TLS 证书错误。免费节点普遍使用自签证书，建议保持 true。
+insecure: true
