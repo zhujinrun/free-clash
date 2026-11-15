@@ -67,6 +67,11 @@ type Config struct {
 	// 订阅来源，支持 http(s) 与本地文件，可填多个。
 	Subscriptions []string `yaml:"subscriptions"`
 
+	// SubCacheTTL 是「按订阅地址分别缓存原始响应」的有效期，0 表示关闭。
+	// 某条源被限流或超时时，用它上次拉到的内容继续供节点，避免几十条订阅里
+	// 挂掉几条就整池缩水。
+	SubCacheTTL Duration `yaml:"sub_cache_ttl"`
+
 	// 探测目标。建议保留默认的 gstatic 204，它能同时验证 DNS、TLS 与出境链路。
 	ProbeURL string `yaml:"probe_url"`
 
@@ -119,6 +124,7 @@ func Default() Config {
 		ArticleMaxSubs:       100,
 		ArticleConcurrency:   8,
 		MaxNodes:             0,
+		SubCacheTTL:          Duration(12 * time.Hour),
 		ProbeURL:             "https://www.gstatic.com/generate_204",
 		PreTimeout:           Duration(2 * time.Second),
 		ProbeTimeout:         Duration(6 * time.Second),

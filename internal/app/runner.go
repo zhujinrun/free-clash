@@ -414,19 +414,17 @@ func (r *runner) loadNodes(ctx context.Context) ([]sub.Proxy, error) {
 	}
 
 	for _, src := range r.cfg.Subscriptions {
-		data, err := sub.Fetch(ctx, src, 60*time.Second)
+		nodes, cached, err := r.fetchSubNodes(ctx, src, 60*time.Second)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", src, err))
 			r.log.Warn("订阅拉取失败", "源", src, "err", err)
 			continue
 		}
-		nodes, err := sub.Parse(data)
-		if err != nil {
-			errs = append(errs, fmt.Sprintf("%s: %v", src, err))
-			r.log.Warn("订阅解析失败", "源", src, "err", err)
-			continue
+		if cached {
+			r.log.Info("订阅使用缓存", "源", src, "节点数", len(nodes))
+		} else {
+			r.log.Info("订阅拉取成功", "源", src, "节点数", len(nodes))
 		}
-		r.log.Info("订阅拉取成功", "源", src, "节点数", len(nodes))
 		all = append(all, sub.TagSource(nodes, sub.SourceOf(src))...)
 	}
 
@@ -498,9 +496,10 @@ func (r *runner) loadFromArticles(ctx context.Context) ([]sub.Proxy, error) {
 	}
 
 	type fetched struct {
-		URL   string
-		Nodes []sub.Proxy
-		Err   error
+		URL    string
+		Nodes  []sub.Proxy
+		Cached bool
+		Err    error
 	}
 	results := make([]fetched, len(src.Subs))
 
@@ -513,20 +512,12 @@ func (r *runner) loadFromArticles(ctx context.Context) ([]sub.Proxy, error) {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			data, ferr := sub.Fetch(ctx, u, articleSubTimeout)
+			nodes, cached, ferr := r.fetchSubNodes(ctx, u, articleSubTimeout)
 			if ferr != nil {
 				results[i] = fetched{URL: u, Err: ferr}
 				return
 			}
-			nodes, perr := sub.ParseAny(data)
-			if perr != nil || len(nodes) == 0 {
-				if perr == nil {
-					perr = fmt.Errorf("解析出 0 个节点")
-				}
-				results[i] = fetched{URL: u, Err: perr}
-				return
-			}
-			results[i] = fetched{URL: u, Nodes: nodes}
+			results[i] = fetched{URL: u, Nodes: nodes, Cached: cached}
 		}(i, u)
 	}
 	wg.Wait()
@@ -536,9 +527,9 @@ func (r *runner) loadFromArticles(ctx context.Context) ([]sub.Proxy, error) {
 	}
 
 	var (
-		all      []sub.Proxy
-		okCount  int
-		failURLs []string
+		all         []sub.Proxy
+		cachedCount int
+		failURLs    []string
 	)
 	for _, res := range results {
 		if res.Err != nil {
@@ -546,13 +537,18 @@ func (r *runner) loadFromArticles(ctx context.Context) ([]sub.Proxy, error) {
 			r.log.Debug("文章订阅不可用", "url", res.URL, "err", res.Err)
 			continue
 		}
-		okCount++
+		if res.Cached {
+			cachedCount++
+		}
 		all = append(all, sub.TagSource(res.Nodes, sub.SourceOf(res.URL))...)
 	}
 	r.log.Info("文章订阅拉取完成",
-		"成功", okCount,
+		"成功", len(src.Subs)-len(failURLs),
 		"失败", len(failURLs),
+		"来源", subCacheSummary(cachedCount, len(src.Subs)-len(failURLs)),
 		"节点数", len(all))
+
+	r.pruneSubCache()
 
 	if len(all) == 0 {
 		return nil, fmt.Errorf("%d 条文章订阅全部拉取失败", len(src.Subs))
@@ -569,24 +565,24 @@ func (r *runner) loadFromSite(ctx context.Context) ([]sub.Proxy, error) {
 		if serr := r.cache.Save(r.cfg.Site, res.URL); serr != nil {
 			r.log.Debug("写解析缓存失败", "err", serr)
 		}
+		r.saveSubCache(res.URL, res.Body)
 		return sub.TagSource(res.Nodes, sub.SourceOf(res.URL)), nil
 	}
 	r.log.Warn("站点解析失败", "站点", r.cfg.Site, "err", err)
 
-	cached, ok := r.cache.Load()
+	fallback, ok := r.cache.Load()
 	if !ok {
 		return nil, err
 	}
-	data, ferr := sub.Fetch(ctx, cached, 60*time.Second)
+	nodes, fromCache, ferr := r.fetchSubNodes(ctx, fallback, 60*time.Second)
 	if ferr != nil {
 		return nil, fmt.Errorf("%w；缓存的订阅地址也不可用: %v", err, ferr)
 	}
-	nodes, perr := sub.Parse(data)
-	if perr != nil || len(nodes) == 0 {
-		return nil, fmt.Errorf("%w；缓存的订阅地址解析失败: %v", err, perr)
+	if fromCache {
+		return sub.TagSource(nodes, sub.SourceOf(fallback)), nil
 	}
-	r.log.Warn("已回退到上次解析出的订阅地址", "地址", cached, "节点数", len(nodes))
-	return sub.TagSource(nodes, sub.SourceOf(cached)), nil
+	r.log.Warn("已回退到上次解析出的订阅地址", "地址", fallback, "节点数", len(nodes))
+	return sub.TagSource(nodes, sub.SourceOf(fallback)), nil
 }
 
 func dedupe(in []sub.Proxy) []sub.Proxy {
