@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -22,6 +23,11 @@ import (
 // 用不到 Clash 大配置那样的 90 秒预算；超时短一些才能在几十条并发里及时发现死链。
 const articleSubTimeout = 30 * time.Second
 
+// lastGoodTTL 是「最近可用」记忆的保留轮数。免费节点的连通性以分钟为单位抖动，
+// 单轮探测把某个节点判死，下一轮它可能又活了；记住最近几轮通过过的节点，本轮掉线时
+// 能再给一次机会，避免一次抖动把订阅数量直接腰斩。
+const lastGoodTTL = 3
+
 // runner 持有一轮轮探测所需的全部依赖，并在多次刷新之间共享状态。
 type runner struct {
 	cfg      config.Config
@@ -30,17 +36,22 @@ type runner struct {
 	resolver *site.Resolver
 	cache    site.Cache
 
-	mu      sync.Mutex
-	running bool
+	mu       sync.Mutex
+	running  bool
+	round    int
+	lastGood map[string]int // 节点键 → 最后一次可用的轮次
 }
 
 func newRunner(o Options, logger *slog.Logger) *runner {
-	return &runner{
+	r := &runner{
 		cfg:      o.Cfg,
 		log:      logger,
 		resolver: site.New(logger).WithAnchor(o.Cfg.SiteButton),
 		cache:    site.Cache{Path: filepath.Join(o.Cfg.OutputDir, "resolved.json")},
+		lastGood: make(map[string]int),
 	}
+	r.loadLastGood()
+	return r
 }
 
 // refresh 执行一轮完整流程：拉取订阅 → 探测 → 排序 → 输出。
@@ -85,6 +96,12 @@ func (r *runner) refresh(ctx context.Context) error {
 	if r.cfg.RefineRounds > 0 && r.cfg.TopN > 0 {
 		probe.Refine(ctx, results, r.cfg.TopN*2, r.cfg.RefineRounds, opts, r.log)
 	}
+
+	// 最近几轮通过过、本轮却掉线的节点，多为瞬时抖动（同批直连节点集体超时、
+	// 本机到某段路由短暂抽风），补测一次往往能救回来。
+	r.round++
+	r.retryDropped(ctx, results, opts)
+	r.rememberGood(results)
 
 	// 复测之后再测速：只对已确认能连通的节点拉数据，省带宽也省时间。
 	if r.cfg.Speedtest && r.cfg.TopN > 0 {
@@ -196,6 +213,177 @@ func (r *runner) refresh(ctx context.Context) error {
 
 // loadNodes 拉取全部订阅。来源优先级：分享站点解析 → 静态订阅地址；
 // 全部失败时回退到上一次成功拉取的缓存。
+// nodeKey 是节点的跨轮标识。名称会随订阅更新变化，不能拿来当键；而同一台服务器
+// 上经常挂着多个 uuid 不同的节点（实测一个 IP 能出七个），只按 协议+地址+端口
+// 会把它们混成一个，补测时就只更新得到其中一个。
+func nodeKey(p sub.Proxy) string {
+	cred := ""
+	for _, field := range []string{"uuid", "password", "id"} {
+		if v, ok := p.Raw[field].(string); ok && v != "" {
+			cred = v
+			break
+		}
+	}
+	return p.Type + "|" + p.Server + "|" + fmt.Sprint(p.Port) + "|" + cred
+}
+
+// retryDropped 对「最近几轮可用、本轮失败」的节点补测，成功则替换回结果。
+//
+// 免费节点的失效经常是整批同时发生的：同一家服务商的十几个 IP、同一段直连路由，
+// 在某一两分钟里一起超时，下一轮又一起恢复。单轮探测只看一次，就会把这一批全部
+// 判死，订阅数量从三四十掉到个位数。补测的价值不在「多探一次」，而在于它发生在
+// 初测之后若干秒，有机会跨过这段抖动窗口。
+func (r *runner) retryDropped(ctx context.Context, results []probe.Result, opts probe.Options) int {
+	if len(r.lastGood) == 0 {
+		return 0
+	}
+	var retry []sub.Proxy
+	pos := make(map[string]int, len(results))
+	for i := range results {
+		res := &results[i]
+		if res.Available() || res.Node.Server == "" {
+			continue
+		}
+		k := nodeKey(res.Node)
+		if _, ok := r.lastGood[k]; !ok {
+			continue
+		}
+		retry = append(retry, res.Node)
+		pos[k] = i
+	}
+	if len(retry) == 0 {
+		return 0
+	}
+
+	rounds := r.cfg.RefineRounds
+	if rounds < 2 {
+		rounds = 2
+	}
+	opts.Rounds = rounds
+	r.log.Info("补测上轮掉线节点", "节点数", len(retry), "轮数", rounds)
+	retested := probe.Run(ctx, retry, opts, r.log)
+
+	back := 0
+	for i := range retested {
+		if !retested[i].Available() {
+			continue
+		}
+		k := nodeKey(retested[i].Node)
+		idx, ok := pos[k]
+		if !ok {
+			continue
+		}
+		results[idx] = retested[i]
+		back++
+	}
+	r.log.Info("掉线节点补测完成", "挽回", back, "共", len(retry))
+	return back
+}
+
+// rememberGood 更新「最近可用」记忆：本轮通过的节点刷新轮次，超过 TTL 的清掉。
+func (r *runner) rememberGood(results []probe.Result) {
+	for k, rnd := range r.lastGood {
+		if r.round-rnd > lastGoodTTL {
+			delete(r.lastGood, k)
+		}
+	}
+	for i := range results {
+		if results[i].Available() {
+			r.lastGood[nodeKey(results[i].Node)] = r.round
+		}
+	}
+	r.saveLastGood()
+}
+
+func (r *runner) lastGoodPath() string {
+	return filepath.Join(r.cfg.OutputDir, "last-good.json")
+}
+
+// loadLastGood 从磁盘恢复记忆，让服务重启后第一轮仍能补测。
+func (r *runner) loadLastGood() {
+	data, err := os.ReadFile(r.lastGoodPath())
+	if err != nil {
+		return
+	}
+	var saved struct {
+		Round int            `json:"round"`
+		Nodes map[string]int `json:"nodes"`
+	}
+	if err := json.Unmarshal(data, &saved); err != nil {
+		r.log.Debug("读取上轮可用记录失败", "err", err)
+		return
+	}
+	r.round = saved.Round
+	for k, rnd := range saved.Nodes {
+		if saved.Round-rnd <= lastGoodTTL {
+			r.lastGood[k] = rnd
+		}
+	}
+}
+
+func (r *runner) saveLastGood() {
+	data, err := json.MarshalIndent(map[string]any{
+		"round": r.round,
+		"nodes": r.lastGood,
+	}, "", " ")
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(r.cfg.OutputDir, 0o755); err != nil {
+		return
+	}
+	if err := os.WriteFile(r.lastGoodPath(), data, 0o644); err != nil {
+		r.log.Debug("写上轮可用记录失败", "err", err)
+	}
+}
+
+// articleSubsTTL 是文章订阅地址列表的保质期。地址指向订阅端点，内容每天更新，
+// 端点本身极少变动；超过一天就当它可能已失效，交回站点重新解析。
+const articleSubsTTL = 24 * time.Hour
+
+// articleSubsCache 是上一次从节点文章里解析出的订阅地址，用于站点不可用时兜底。
+type articleSubsCache struct {
+	SavedAt  time.Time `json:"saved_at"`
+	Articles []string  `json:"articles"`
+	Subs     []string  `json:"subs"`
+}
+
+func (r *runner) articleSubsPath() string {
+	return filepath.Join(r.cfg.OutputDir, "article-subs.json")
+}
+
+func (r *runner) saveArticleSubs(src *site.ArticleSources) {
+	data, err := json.MarshalIndent(articleSubsCache{
+		SavedAt:  time.Now(),
+		Articles: src.Articles,
+		Subs:     src.Subs,
+	}, "", " ")
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(r.cfg.OutputDir, 0o755); err != nil {
+		return
+	}
+	if err := os.WriteFile(r.articleSubsPath(), data, 0o644); err != nil {
+		r.log.Debug("写文章订阅缓存失败", "err", err)
+	}
+}
+
+func (r *runner) loadArticleSubs() ([]string, time.Time, bool) {
+	data, err := os.ReadFile(r.articleSubsPath())
+	if err != nil {
+		return nil, time.Time{}, false
+	}
+	var saved articleSubsCache
+	if err := json.Unmarshal(data, &saved); err != nil || len(saved.Subs) == 0 {
+		return nil, time.Time{}, false
+	}
+	if time.Since(saved.SavedAt) > articleSubsTTL {
+		return nil, time.Time{}, false
+	}
+	return saved.Subs, saved.SavedAt, true
+}
+
 func (r *runner) loadNodes(ctx context.Context) ([]sub.Proxy, error) {
 	cachePath := filepath.Join(r.cfg.OutputDir, "last-sub.yaml")
 
@@ -270,16 +458,39 @@ func (r *runner) loadNodes(ctx context.Context) ([]sub.Proxy, error) {
 // loadFromArticles 跟进「查看节点文章」，把文章里列出的订阅逐个拉一遍。
 func (r *runner) loadFromArticles(ctx context.Context) ([]sub.Proxy, error) {
 	src, err := r.resolver.ArticleSubscriptions(ctx, r.cfg.Site, r.cfg.ArticleLimit, r.cfg.ArticleMaxSubs)
+
+	// 站点抽风时别让整条路线作废。首页超时、文章页改版都会让这里一次拿到 0 条，
+	// 而订阅地址本身变化很慢——沿用上次解析出的列表继续拉，节点池还能保持一万多，
+	// 否则只剩精选订阅那四千个，可用数会从三四十直接掉到个位数。
+	if err != nil || src == nil || len(src.Subs) == 0 {
+		if cached, savedAt, ok := r.loadArticleSubs(); ok {
+			r.log.Warn("文章页不可用，改用上次解析出的订阅列表",
+				"订阅数", len(cached), "缓存于", savedAt.Format("01-02 15:04"), "err", err)
+			src = &site.ArticleSources{Subs: cached}
+			err = nil
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
-	if len(src.Subs) == 0 {
-		return nil, fmt.Errorf("最近 %d 篇文章中没有解析到订阅地址", len(src.Articles))
+	if src == nil || len(src.Subs) == 0 {
+		found := 0
+		if src != nil {
+			found = len(src.Articles)
+		}
+		return nil, fmt.Errorf("最近 %d 篇文章中没有解析到订阅地址", found)
+	}
+
+	r.saveArticleSubs(src)
+
+	first := ""
+	if len(src.Articles) > 0 {
+		first = src.Articles[0]
 	}
 	r.log.Info("已从节点文章收集订阅",
 		"文章数", len(src.Articles),
 		"订阅数", len(src.Subs),
-		"首篇", src.Articles[0])
+		"首篇", first)
 
 	concurrency := r.cfg.ArticleConcurrency
 	if concurrency <= 0 {
