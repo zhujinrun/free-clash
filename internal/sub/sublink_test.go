@@ -113,7 +113,9 @@ func TestParseLinkUnsupported(t *testing.T) {
 		"@1.1.1.1:443?plugin=obfs-local%3Bobfs%3Dhttp#x"
 	for _, link := range []string{
 		"hysteria2://pass@example.com:443?sni=example.com#HY2",
-		"vless://uuid@host:443?type=ws#x",
+		// REALITY 需要伪造 ClientHello 指纹，gRPC / xhttp 传输也未实现。
+		"vless://11111111-2222-3333-4444-555555555555@host:443?security=reality&type=tcp#x",
+		"vless://11111111-2222-3333-4444-555555555555@host:443?security=tls&type=grpc#x",
 		"ssr://xxx",
 		"not-a-link",
 		plugin, // 插件节点的探测行为与明文 SS 不同，属于不支持的范围
@@ -225,4 +227,59 @@ func chunk(s string, n int) string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// VLESS 链接有两种需要特别处理的写法：path 被编码两层（%252F），
+// 以及 xtls-rprx-vision 的 flow 声明。前者解错会让 WS 全部 404。
+func TestParseVLESSLink(t *testing.T) {
+	link := "vless://b831381d-6324-4d53-ad4f-8cda48b30811@vl.example.com:443" +
+		"?type=ws&path=%252Fapi%252Fv1%252Fguests%252F5de1%252F&host=cdn.example.com" +
+		"&security=tls&sni=cdn.example.com&flow=xtls-rprx-vision#VL-01"
+
+	p, err := ParseLink(link)
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if p.Type != "vless" || p.Server != "vl.example.com" || p.Port != 443 {
+		t.Fatalf("节点字段错误: %+v", p)
+	}
+	if got := toString(p.Raw["uuid"]); got != "b831381d-6324-4d53-ad4f-8cda48b30811" {
+		t.Errorf("uuid = %q", got)
+	}
+	if !booleanish(p.Raw["tls"]) {
+		t.Error("security=tls 应映射为 tls: true")
+	}
+	if got := toString(p.Raw["servername"]); got != "cdn.example.com" {
+		t.Errorf("servername = %q", got)
+	}
+	ws, _ := p.Raw["ws-opts"].(map[string]any)
+	if got := toString(ws["path"]); got != "/api/v1/guests/5de1/" {
+		t.Errorf("两层编码的 path 应解到只剩一层，got %q", got)
+	}
+	if h, _ := ws["headers"].(map[string]any); toString(h["Host"]) != "cdn.example.com" {
+		t.Errorf("ws Host = %v", ws["headers"])
+	}
+	if got := toString(p.Raw["flow"]); got != "xtls-rprx-vision" {
+		t.Errorf("flow = %q", got)
+	}
+	if p.Name != "VL-01" {
+		t.Errorf("name = %q", p.Name)
+	}
+}
+
+// network 的几种别名都应按 tcp 处理，否则节点会被无谓地判为不支持。
+func TestParseVLESSNetworkAliases(t *testing.T) {
+	for _, netw := range []string{"", "tcp", "raw", "none"} {
+		link := "vless://b831381d-6324-4d53-ad4f-8cda48b30811@h.example.com:443?security=none"
+		if netw != "" {
+			link += "&type=" + netw
+		}
+		p, err := ParseLink(link)
+		if err != nil {
+			t.Fatalf("type=%q 应可解析: %v", netw, err)
+		}
+		if got := toString(p.Raw["network"]); got != "" {
+			t.Errorf("type=%q 应归一化为 tcp，实际 %q", netw, got)
+		}
+	}
 }

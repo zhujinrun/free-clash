@@ -91,6 +91,8 @@ func ParseLink(link string) (Proxy, error) {
 		return parseTrojanLink(link)
 	case strings.HasPrefix(lower, "vmess://"):
 		return parseVMessLink(link)
+	case strings.HasPrefix(lower, "vless://"):
+		return parseVLESSLink(link)
 	default:
 		return Proxy{}, fmt.Errorf("%w: %s", ErrUnsupportedLink, schemeOf(link))
 	}
@@ -347,6 +349,103 @@ func parseVMessLink(link string) (Proxy, error) {
 		}
 	}
 	return newProxy(raw), nil
+}
+
+// parseVLESSLink 解析 vless://uuid@host:port?security=tls&type=ws&...
+//
+// 免费节点池里 VLESS 占比不低，且绝大多数是普通 TLS + WS。REALITY 需要
+// 伪造特定 ClientHello 指纹，本程序不实现，直接判为不支持。
+func parseVLESSLink(link string) (Proxy, error) {
+	u, err := url.Parse(link)
+	if err != nil {
+		return Proxy{}, fmt.Errorf("%w: vless 链接无法解析: %v", ErrUnsupportedLink, err)
+	}
+	uuid := u.User.Username()
+	if uuid == "" {
+		return Proxy{}, fmt.Errorf("%w: vless 缺少 uuid", ErrUnsupportedLink)
+	}
+	host, port, err := parseHostPort(u.Host)
+	if err != nil {
+		return Proxy{}, err
+	}
+
+	q := u.Query()
+	security := strings.ToLower(q.Get("security"))
+	switch security {
+	case "", "none", "tls":
+	case "reality":
+		return Proxy{}, fmt.Errorf("%w: vless reality", ErrUnsupportedLink)
+	default:
+		return Proxy{}, fmt.Errorf("%w: vless security=%s", ErrUnsupportedLink, security)
+	}
+
+	network := strings.ToLower(q.Get("type"))
+	switch network {
+	case "", "tcp", "raw", "none":
+		network = "tcp"
+	case "ws":
+	default:
+		return Proxy{}, fmt.Errorf("%w: vless network=%s", ErrUnsupportedLink, network)
+	}
+
+	raw := map[string]any{
+		"name":   nameOrDefault(u.Fragment, host, port),
+		"type":   "vless",
+		"server": host,
+		"port":   port,
+		"uuid":   uuid,
+	}
+	if network != "tcp" {
+		raw["network"] = network
+	}
+	if security == "tls" {
+		raw["tls"] = true
+		sni := q.Get("sni")
+		if sni == "" {
+			sni = q.Get("host")
+		}
+		if sni == "" {
+			sni = host
+		}
+		raw["servername"] = sni
+	}
+	if v := q.Get("allowInsecure"); v == "1" || strings.EqualFold(v, "true") {
+		raw["skip-cert-verify"] = true
+	}
+	if alpn := q.Get("alpn"); alpn != "" {
+		raw["alpn"] = percentDecode(alpn)
+	}
+	if flow := q.Get("flow"); flow != "" {
+		// xtls-rprx-vision 的填充只作用于 TLS-in-TLS 流量，普通请求按原样透传，
+		// 因此这里保留声明即可，探测结果会自然筛掉不兼容的节点。
+		raw["flow"] = flow
+	}
+	if network == "ws" {
+		ws := map[string]any{}
+		if path := q.Get("path"); path != "" {
+			// 部分订阅把 path 编码了两层（%252F...），要再解一次才是 /api/...
+			ws["path"] = unescapeLayers(path, 2)
+		}
+		if h := q.Get("host"); h != "" {
+			ws["headers"] = map[string]any{"Host": h}
+		}
+		if len(ws) > 0 {
+			raw["ws-opts"] = ws
+		}
+	}
+	return newProxy(raw), nil
+}
+
+// unescapeLayers 最多解码 max 层百分号编码。
+func unescapeLayers(s string, max int) string {
+	for i := 0; i < max && strings.Contains(s, "%"); i++ {
+		d, err := url.PathUnescape(s)
+		if err != nil || d == s {
+			break
+		}
+		s = d
+	}
+	return s
 }
 
 // vmessCipher 把分享链接里的 scy 映射回 Clash 的 cipher 取值。

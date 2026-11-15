@@ -124,6 +124,96 @@ func TestXrayLoopback(t *testing.T) {
 			},
 		},
 		{
+			name: "vless-tcp",
+			inbound: map[string]any{
+				"protocol": "vless",
+				"settings": map[string]any{
+					"decryption": "none",
+					"clients":    []any{map[string]any{"id": uuid}},
+				},
+				"streamSettings": map[string]any{"network": "tcp"},
+			},
+			node: func(port int) map[string]any {
+				return map[string]any{
+					"type": "vless", "server": "127.0.0.1", "port": port,
+					"uuid": uuid, "network": "tcp",
+				}
+			},
+		},
+		{
+			name: "vless-tls",
+			inbound: map[string]any{
+				"protocol": "vless",
+				"settings": map[string]any{
+					"decryption": "none",
+					"clients":    []any{map[string]any{"id": uuid}},
+				},
+				"streamSettings": map[string]any{
+					"network":     "tcp",
+					"security":    "tls",
+					"tlsSettings": tlsSettings,
+				},
+			},
+			node: func(port int) map[string]any {
+				return map[string]any{
+					"type": "vless", "server": "127.0.0.1", "port": port,
+					"uuid": uuid, "network": "tcp", "tls": true,
+					"servername": "vl.example.com", "skip-cert-verify": true,
+				}
+			},
+		},
+		{
+			name: "vless-ws",
+			inbound: map[string]any{
+				"protocol": "vless",
+				"settings": map[string]any{
+					"decryption": "none",
+					"clients":    []any{map[string]any{"id": uuid}},
+				},
+				"streamSettings": map[string]any{
+					"network":    "ws",
+					"wsSettings": map[string]any{"path": "/vlws"},
+				},
+			},
+			node: func(port int) map[string]any {
+				return map[string]any{
+					"type": "vless", "server": "127.0.0.1", "port": port,
+					"uuid": uuid, "network": "ws",
+					"ws-opts": map[string]any{"path": "/vlws"},
+				}
+			},
+		},
+		{
+			name: "vless-wss",
+			inbound: map[string]any{
+				"protocol": "vless",
+				"settings": map[string]any{
+					"decryption": "none",
+					"clients":    []any{map[string]any{"id": uuid}},
+				},
+				"streamSettings": map[string]any{
+					"network":     "ws",
+					"security":    "tls",
+					"tlsSettings": tlsSettings,
+					"wsSettings": map[string]any{
+						"path":    "/vlwss",
+						"headers": map[string]any{"Host": "vl.example.com"},
+					},
+				},
+			},
+			node: func(port int) map[string]any {
+				return map[string]any{
+					"type": "vless", "server": "127.0.0.1", "port": port,
+					"uuid": uuid, "network": "ws", "tls": true,
+					"servername": "vl.example.com", "skip-cert-verify": true,
+					"ws-opts": map[string]any{
+						"path":    "/vlwss",
+						"headers": map[string]any{"Host": "vl.example.com"},
+					},
+				}
+			},
+		},
+		{
 			name: "trojan-tcp",
 			inbound: map[string]any{
 				"protocol": "trojan",

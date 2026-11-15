@@ -45,6 +45,8 @@ func New(raw map[string]any) (Dialer, error) {
 		return newTrojan(raw)
 	case "vmess":
 		return newVMess(raw)
+	case "vless":
+		return newVLESS(raw)
 	default:
 		return nil, fmt.Errorf("%w: type=%s", ErrUnsupported, str(raw["type"]))
 	}

@@ -42,6 +42,10 @@
 | Trojan | grpc | TLS | 否 |
 | VMess (AEAD, alterId=0) | tcp / ws | auto / aes-128-gcm | 是 |
 | VMess (alterId>0) | — | 旧版非 AEAD | 否 |
+| VLESS | tcp / ws | 无加密层，TLS / 明文 | 是 |
+| VLESS + REALITY | — | 需伪造 ClientHello 指纹 | 否 |
+| VLESS | grpc / xhttp | — | 否 |
+| Hysteria2 | — | QUIC | 否 |
 
 不支持的节点会被标记为「跳过」并计入报告，不影响其他节点的探测。
 
@@ -153,7 +157,7 @@ go run . -site https://freeclash.zhaotizi.best/ -button "复制订阅" -resolve 
 几个处理上的取舍：
 
 - **只认卡片结构里的地址**。文章页同样混着推广、教程、返佣链接，直接扫全页外链会拉进几十个无效请求。现在优先取 `copy-box` 里的 `<code>`，抽不到时才退化为「标签 + 链接」，最后才扫全页。
-- **三种订阅格式都能读**。这些「通用订阅」基本是 base64 包裹的分享链接（`vmess://`、`trojan://`、`ss://`），而不是 Clash YAML。程序会依次尝试 YAML、明文链接、base64 链接，并丢弃本程序不支持探测的协议（vless、hysteria2、ssr 等），避免浪费探测配额。
+- **三种订阅格式都能读**。这些「通用订阅」基本是 base64 包裹的分享链接（`vmess://`、`trojan://`、`ss://`、`vless://`），而不是 Clash YAML。程序会依次尝试 YAML、明文链接、base64 链接，并丢弃本程序不支持探测的协议（hysteria2、ssr、VLESS+REALITY 等），避免浪费探测配额。
 - **失败不影响整体**。50 条订阅里通常有个位数拉不动（仓库被墙、301 跳转、返回 404），逐条记录在 `-v` 日志里，其余照常合并。
 - **注意耗时**。2 篇文章约 100 条订阅、上万节点，一轮大约 5–10 分钟。嫌久可以调小 `article_limit` / `article_max_subs`，或用 `max_nodes` 截断总量。
 
@@ -249,6 +253,7 @@ v2ray 系客户端不认 Clash 的 YAML，所以 `/best.yaml` 在它们那里会
 |---|---|---|
 | SS：aes-128-gcm、aes-256-gcm、chacha20-ietf-poly1305 | go-shadowsocks2 | `TestSSLoopbackCiphers` |
 | VMess：tcp、ws、wss | Xray | `TestXrayLoopback` |
+| VLESS：tcp（明文）、tcp+tls、ws、wss | Xray | `TestXrayLoopback` |
 | Trojan：tcp、ws | Xray | `TestXrayLoopback` |
 | VMess KDF | Xray 官方实现的输出向量 | `TestVMessKDFVector` |
 
@@ -273,7 +278,8 @@ SS_SERVER_BIN=/path/to/go-shadowsocks2 go test ./internal/proxy -run TestSSLoopb
 
 - 只探测 TCP 类代理，不涉及 UDP 转发能力；对需要 UDP 的场景（如游戏、部分 QUIC 应用）判断可能偏乐观。
 - 探测结果为「当前网络环境」下的结论。换网络、换运营商后应重新巡检。
-- 不实现 Shadowsocks 2022 系列加密与 gRPC 传输，这两类节点会被跳过。
+- 不实现 Shadowsocks 2022 系列加密、gRPC 与 xhttp 传输，这几类节点会被跳过。
+- 不实现 VLESS 的 REALITY（需伪造特定 ClientHello 指纹）；这类节点占 VLESS 的一成多。
 - VMess `alterId > 0` 的旧版（非 AEAD）实现不支持，这类节点会被跳过（本订阅中约 231 个）。
 - SS 的流加密（aes-*-cfb、rc4-md5）按规范实现，但未找到可用的独立对端做回环验证，置信度低于 AEAD 系列。
 - 并发默认 96，过高会触发部分节点的限流误判，不建议盲目调大。
@@ -293,11 +299,12 @@ freeclash/
 │   │   ├── ss.go            Shadowsocks（AEAD + 流加密）
 │   │   ├── trojan.go        Trojan
 │   │   ├── vmess.go         VMess AEAD + chunk stream
+│   │   ├── vless.go         VLESS（裸字节流，TLS / WS / 明文）
 │   │   └── ws.go            WebSocket 客户端（RFC 6455 子集）
 │   ├── sub/                 订阅拉取、解析、过滤、配置生成
 │   │   ├── sub.go           Clash 解析/生成、去重、地区识别
 │   │   ├── sublink.go       分享链接解析（YAML / 明文 / base64 三种订阅形态）
-│   │   └── links.go         分享链接渲染（ss / trojan / vmess）
+│   │   └── links.go         分享链接渲染（ss / trojan / vmess / vless）
 │   ├── site/                从分享站点解析订阅地址
 │   │   ├── resolve.go       按「复制精选订阅」按钮定位订阅
 │   │   └── articles.go      跟进「查看节点文章」，收集文章里的通用订阅

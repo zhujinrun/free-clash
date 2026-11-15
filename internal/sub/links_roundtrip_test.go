@@ -61,6 +61,27 @@ func parseLink(t *testing.T, link string) parsedNode {
 			name:     u.Fragment,
 		}
 
+	case len(link) > 8 && link[:8] == "vless://":
+		u, err := url.Parse(link)
+		if err != nil {
+			t.Fatalf("vless 链接解析失败: %v (%s)", err, link)
+		}
+		host, port := splitHostPort(t, u.Host)
+		q := u.Query()
+		return parsedNode{
+			kind:     "vless",
+			server:   host,
+			port:     port,
+			secret:   u.User.Username(),
+			network:  q.Get("type"),
+			wsHost:   q.Get("host"),
+			wsPath:   q.Get("path"),
+			tls:      q.Get("security") == "tls",
+			sni:      q.Get("sni"),
+			skipCert: q.Get("allowInsecure") == "1",
+			name:     u.Fragment,
+		}
+
 	case len(link) > 8 && link[:8] == "vmess://":
 		body, err := base64.StdEncoding.DecodeString(link[8:])
 		if err != nil {
@@ -153,6 +174,25 @@ func TestLinkRoundTrip(t *testing.T) {
 				secret: "b831381d-6324-4d53-ad4f-8cda48b30811", network: "ws",
 				wsHost: "ws.example.com", wsPath: "/vm", tls: true,
 				sni: "sni.example.com", name: "VM-01"},
+		},
+		{
+			proxy: testProxy("vless", map[string]any{
+				"name":       "VL-01 | 法兰克福",
+				"server":     "vl.example.com",
+				"port":       443,
+				"uuid":       "b831381d-6324-4d53-ad4f-8cda48b30811",
+				"tls":        true,
+				"servername": "sni.example.com",
+				"network":    "ws",
+				"ws-opts": map[string]any{
+					"path":    "/api/v1/guests/x?ed=2048",
+					"headers": map[string]any{"Host": "ws.example.com"},
+				},
+			}),
+			want: parsedNode{kind: "vless", server: "vl.example.com", port: 443,
+				secret: "b831381d-6324-4d53-ad4f-8cda48b30811", network: "ws",
+				wsHost: "ws.example.com", wsPath: "/api/v1/guests/x?ed=2048",
+				tls: true, sni: "sni.example.com", name: "VL-01 | 法兰克福"},
 		},
 	}
 

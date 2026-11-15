@@ -53,6 +53,8 @@ func Link(p Proxy) (string, error) {
 		return trojanLink(p)
 	case "vmess":
 		return vmessLink(p)
+	case "vless":
+		return vlessLink(p)
 	default:
 		return "", fmt.Errorf("unsupported proxy type: %s", p.Type)
 	}
@@ -154,6 +156,44 @@ func trojanLink(p Proxy) (string, error) {
 	// 「@ 之前整段是用户名」解析，口令含冒号时会被截断，这里补一次编码。
 	userinfo := strings.ReplaceAll(url.User(password).String(), ":", "%3A")
 	return u.Scheme + "://" + userinfo + "@" + u.Host + "?" + u.RawQuery + "#" + u.EscapedFragment(), nil
+}
+
+// vlessLink 输出 vless://uuid@host:port?encryption=none&security=...#name
+func vlessLink(p Proxy) (string, error) {
+	id := toString(p.Raw["uuid"])
+	if id == "" {
+		return "", fmt.Errorf("vless node missing uuid")
+	}
+
+	q := url.Values{}
+	q.Set("encryption", "none")
+	if booleanish(p.Raw["tls"]) {
+		q.Set("security", "tls")
+		if sni := firstNonEmpty(toString(p.Raw["servername"]), toString(p.Raw["sni"])); sni != "" {
+			q.Set("sni", sni)
+		}
+	} else {
+		q.Set("security", "none")
+	}
+	if booleanish(p.Raw["skip-cert-verify"]) {
+		q.Set("allowInsecure", "1")
+	}
+	if alpn := toString(p.Raw["alpn"]); alpn != "" {
+		q.Set("alpn", alpn)
+	}
+	if flow := toString(p.Raw["flow"]); flow != "" {
+		q.Set("flow", flow)
+	}
+	applyTransport(q, p.Raw)
+
+	u := &url.URL{
+		Scheme:   "vless",
+		User:     url.User(id),
+		Host:     hostPort(p),
+		RawQuery: q.Encode(),
+		Fragment: p.Name,
+	}
+	return u.String(), nil
 }
 
 // vmessLink 输出 v2rayN 的 vmess://base64(JSON) 格式。
