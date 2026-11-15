@@ -54,6 +54,16 @@ type Config struct {
 	// 所在的 JS 模块，再在模块内提取订阅地址；站点改文案时调整此项即可。
 	SiteButton string `yaml:"site_button"`
 
+	// ArticleLimit 是跟进「查看节点文章」的篇数。每篇文章通常挂着几十条
+	// 「通用订阅」，节点数量远多于首页那份精选订阅。0 表示只用精选订阅。
+	ArticleLimit int `yaml:"article_limit"`
+	// ArticleMaxSubs 限制每轮从文章中收集的订阅总数，0 表示不限。
+	ArticleMaxSubs int `yaml:"article_max_subs"`
+	// ArticleConcurrency 是拉取这些订阅的并发数。
+	ArticleConcurrency int `yaml:"article_concurrency"`
+	// MaxNodes 是合并去重后的节点上限，0 表示不限。节点过多时可用来缩短单轮耗时。
+	MaxNodes int `yaml:"max_nodes"`
+
 	// 订阅来源，支持 http(s) 与本地文件，可填多个。
 	Subscriptions []string `yaml:"subscriptions"`
 
@@ -91,20 +101,24 @@ type Config struct {
 // Default 返回一份可直接运行的默认配置。
 func Default() Config {
 	return Config{
-		Subscriptions:   nil,
-		SiteButton:      "复制精选订阅",
-		ProbeURL:        "https://www.gstatic.com/generate_204",
-		PreTimeout:      Duration(2 * time.Second),
-		ProbeTimeout:    Duration(6 * time.Second),
-		PreConcurrency:  256,
-		Concurrency:     96,
-		Rounds:          1,
-		RefineRounds:    3,
-		TopN:            30,
-		OutputDir:       "out",
-		Interval:        Duration(30 * time.Minute),
-		PerRegionGroups: 6,
-		Insecure:        true,
+		Subscriptions:      nil,
+		SiteButton:         "复制精选订阅",
+		ArticleLimit:       2,
+		ArticleMaxSubs:     100,
+		ArticleConcurrency: 8,
+		MaxNodes:           0,
+		ProbeURL:           "https://www.gstatic.com/generate_204",
+		PreTimeout:         Duration(2 * time.Second),
+		ProbeTimeout:       Duration(6 * time.Second),
+		PreConcurrency:     256,
+		Concurrency:        96,
+		Rounds:             1,
+		RefineRounds:       3,
+		TopN:               30,
+		OutputDir:          "out",
+		Interval:           Duration(30 * time.Minute),
+		PerRegionGroups:    6,
+		Insecure:           true,
 	}
 }
 

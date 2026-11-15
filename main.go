@@ -344,6 +344,7 @@ type cliFlags struct {
 	urls        *string
 	siteURL     *string
 	siteButton  *string
+	articles    *int
 	resolveOnly *bool
 	once        *bool
 	interval    *time.Duration
@@ -366,6 +367,7 @@ func parseFlags(args []string) (*cliFlags, error) {
 		urls:        fs.String("url", "", "订阅地址，多个用逗号分隔（覆盖配置）"),
 		siteURL:     fs.String("site", "", "分享站点首页地址，自动从页面解析精选订阅（覆盖配置）"),
 		siteButton:  fs.String("button", "", "页面上「复制精选订阅」按钮文案，用于定位订阅地址（覆盖配置）"),
+		articles:    fs.Int("articles", 0, "跟进「查看节点文章」的篇数，0 表示只用精选订阅（覆盖配置）"),
 		resolveOnly: fs.Bool("resolve", false, "只解析并打印订阅地址，不执行探测"),
 		once:        fs.Bool("once", false, "只探测一次后退出"),
 		interval:    fs.Duration("interval", 0, "定时探测间隔，如 30m（覆盖配置）"),
@@ -432,6 +434,9 @@ func buildOptions(f *cliFlags) (app.Options, error) {
 	}
 	if *f.siteButton != "" {
 		cfg.SiteButton = *f.siteButton
+	}
+	if *f.articles > 0 {
+		cfg.ArticleLimit = *f.articles
 	}
 	if *f.interval > 0 {
 		cfg.Interval = config.Duration(*f.interval)
@@ -555,6 +560,7 @@ func printUsage() {
 常用参数:
   -config <路径>   配置文件，默认查找 exe 旁或当前目录的 config.yaml
   -site <地址>     分享站点首页，自动解析「复制精选订阅」的地址
+  -articles <篇数> 跟进「查看节点文章」，把文章里的订阅逐个探测（默认 2）
   -url <地址>      订阅地址，多个用逗号分隔
   -serve <监听>    本地订阅服务，如 :9898
   -interval <时长> 定时探测间隔，如 30m

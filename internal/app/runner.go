@@ -18,6 +18,10 @@ import (
 	"freeclash/internal/sub"
 )
 
+// articleSubTimeout 是拉取文章里单条订阅的超时。这类订阅普遍只有几十 KB，
+// 用不到 Clash 大配置那样的 90 秒预算；超时短一些才能在几十条并发里及时发现死链。
+const articleSubTimeout = 30 * time.Second
+
 // runner 持有一轮轮探测所需的全部依赖，并在多次刷新之间共享状态。
 type runner struct {
 	cfg      config.Config
@@ -197,6 +201,17 @@ func (r *runner) loadNodes(ctx context.Context) ([]sub.Proxy, error) {
 		all = append(all, nodes...)
 	}
 
+	// 文章路线：首页「查看节点文章」→ 每日汇总页 → 几十条通用订阅。
+	// 这条线才是节点数量的大头，精选订阅只是其中一份。
+	if r.cfg.Site != "" && r.cfg.ArticleLimit > 0 {
+		nodes, err := r.loadFromArticles(ctx)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("文章订阅: %v", err))
+			r.log.Warn("文章订阅不可用", "err", err)
+		}
+		all = append(all, nodes...)
+	}
+
 	for _, src := range r.cfg.Subscriptions {
 		data, err := sub.Fetch(ctx, src, 60*time.Second)
 		if err != nil {
@@ -231,7 +246,94 @@ func (r *runner) loadNodes(ctx context.Context) ([]sub.Proxy, error) {
 			os.WriteFile(cachePath, raw, 0o644)
 		}
 	}
-	return dedupe(all), nil
+	out := dedupe(all)
+	if r.cfg.MaxNodes > 0 && len(out) > r.cfg.MaxNodes {
+		r.log.Info("节点数超过上限，按来源顺序截断", "上限", r.cfg.MaxNodes, "实际", len(out))
+		out = out[:r.cfg.MaxNodes]
+	}
+	return out, nil
+}
+
+// loadFromArticles 跟进「查看节点文章」，把文章里列出的订阅逐个拉一遍。
+func (r *runner) loadFromArticles(ctx context.Context) ([]sub.Proxy, error) {
+	src, err := r.resolver.ArticleSubscriptions(ctx, r.cfg.Site, r.cfg.ArticleLimit, r.cfg.ArticleMaxSubs)
+	if err != nil {
+		return nil, err
+	}
+	if len(src.Subs) == 0 {
+		return nil, fmt.Errorf("最近 %d 篇文章中没有解析到订阅地址", len(src.Articles))
+	}
+	r.log.Info("已从节点文章收集订阅",
+		"文章数", len(src.Articles),
+		"订阅数", len(src.Subs),
+		"首篇", src.Articles[0])
+
+	concurrency := r.cfg.ArticleConcurrency
+	if concurrency <= 0 {
+		concurrency = 8
+	}
+
+	type fetched struct {
+		URL   string
+		Nodes []sub.Proxy
+		Err   error
+	}
+	results := make([]fetched, len(src.Subs))
+
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	for i, u := range src.Subs {
+		wg.Add(1)
+		go func(i int, u string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			data, ferr := sub.Fetch(ctx, u, articleSubTimeout)
+			if ferr != nil {
+				results[i] = fetched{URL: u, Err: ferr}
+				return
+			}
+			nodes, perr := sub.ParseAny(data)
+			if perr != nil || len(nodes) == 0 {
+				if perr == nil {
+					perr = fmt.Errorf("解析出 0 个节点")
+				}
+				results[i] = fetched{URL: u, Err: perr}
+				return
+			}
+			results[i] = fetched{URL: u, Nodes: nodes}
+		}(i, u)
+	}
+	wg.Wait()
+
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
+	var (
+		all      []sub.Proxy
+		okCount  int
+		failURLs []string
+	)
+	for _, res := range results {
+		if res.Err != nil {
+			failURLs = append(failURLs, res.URL)
+			r.log.Debug("文章订阅不可用", "url", res.URL, "err", res.Err)
+			continue
+		}
+		okCount++
+		all = append(all, res.Nodes...)
+	}
+	r.log.Info("文章订阅拉取完成",
+		"成功", okCount,
+		"失败", len(failURLs),
+		"节点数", len(all))
+
+	if len(all) == 0 {
+		return nil, fmt.Errorf("%d 条文章订阅全部拉取失败", len(src.Subs))
+	}
+	return all, nil
 }
 
 // loadFromSite 从分享站点首页解析出订阅地址并拉取节点。
