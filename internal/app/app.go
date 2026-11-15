@@ -146,6 +146,13 @@ func startHTTPServer(ctx context.Context, o Options, r *runner, logger *slog.Log
 		return nil
 	}
 	srv := server.New(o.Cfg.ServeAddr, r.refresh)
+	// 重启后到首轮跑完之间有几到十几分钟空窗，先用上次的产出顶上，别让客户端
+	// 回源拿到 503。首轮完成时会被正常快照覆盖。
+	if snap, ok := loadPreviousSnapshot(o.Cfg.OutputDir); ok {
+		srv.Update(snap)
+		logger.Info("已载入上次的产出，首轮完成前继续对外提供",
+			"节点数", snap.Available, "上次更新", snap.Updated.Format("01-02 15:04"))
+	}
 	host := normalizeHost(o.Cfg.ServeAddr)
 	go func() {
 		logger.Info("订阅服务已启动",

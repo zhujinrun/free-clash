@@ -23,6 +23,10 @@ type Snapshot struct {
 	Total     int
 	Available int
 	TopNodes  []string
+
+	// Warm 表示这份快照来自上次运行的产出，本轮探测尚未完成。
+	// 此时 Total 不可知（填 0），节点数是按输出条数推出来的。
+	Warm bool
 }
 
 // Server 对外暴露 /best.yaml、/best.txt、/best.links、/status 与 /refresh。
@@ -134,11 +138,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]any{
-		"updated":   snap.Updated,
-		"total":     snap.Total,
-		"available": snap.Available,
-		"top_nodes": snap.TopNodes,
-		"links":     len(snap.Links) > 0,
+		"updated":    snap.Updated,
+		"total":      snap.Total,
+		"available":  snap.Available,
+		"top_nodes":  snap.TopNodes,
+		"links":      len(snap.Links) > 0,
+		"warm_start": snap.Warm,
 	})
 }
 
