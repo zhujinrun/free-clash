@@ -25,7 +25,8 @@
 ```
 订阅 → 解析去重 → 关键字过滤 → TCP 预筛 → 隧道探测 → 复测排序 → 生成订阅
                                                     ↓
-                                            本地 HTTP 服务 /best.yaml
+                              ├── Clash 格式  /best.yaml
+                              └── v2ray 格式  /best.txt
 ```
 
 ## 协议支持
@@ -136,15 +137,20 @@ go run . -site https://freeclash.zhaotizi.best/ -button "复制订阅" -resolve 
 
 `-v` 会打印候选地址的分数与命中依据，页面改版时用它定位问题最直接。
 
-## 接入 Clash
+## 接入客户端
 
-在 Clash 客户端中把订阅地址填为本地服务：
+同一批节点会输出两种格式，按客户端选一个：
 
-```
-http://127.0.0.1:9898/best.yaml
-```
+| 客户端 | 订阅地址 | 格式 |
+|---|---|---|
+| Clash / mihomo / Clash Verge / Stash | `http://127.0.0.1:9898/best.yaml` | Clash YAML |
+| v2rayN / v2rayA / Shadowrocket / NekoBox | `http://127.0.0.1:9898/best.txt` | base64 分享链接 |
 
-也可以直接使用生成的 `out/best.yaml`，通过本地文件方式导入。生成的配置包含：
+v2ray 系客户端不认 Clash 的 YAML，所以 `/best.yaml` 在它们那里会导入失败或显示「不支持的格式」；反过来 Clash 也读不了 base64 订阅。两个地址指向同一份节点列表，只是序列化方式不同。
+
+也可以直接用文件：`out/best.yaml` 给 Clash 本地导入，`out/best.txt` 给 v2rayN 从剪贴板导入。`out/best.links` 是未编码的分享链接，便于人工核对。
+
+生成的 Clash 配置包含：
 
 - 一个 `🚀 节点选择`（select）主组
 - 一个 `♻️ 自动选择`（url-test）组，覆盖全部入选节点
@@ -191,6 +197,8 @@ http://127.0.0.1:9898/best.yaml
 | 文件 | 内容 |
 |---|---|
 | `out/best.yaml` | 可直接导入 Clash 的精简配置，仅含入选节点 |
+| `out/best.txt` | 同一批节点的 base64 订阅，供 v2rayN / v2rayA / Shadowrocket 导入 |
+| `out/best.links` | 未编码的分享链接，一行一个，便于人工查看 |
 | `out/report.json` | 全部节点的逐次探测明细，含失败原因，用于排查 |
 | `out/last-sub.yaml` | 最近一次成功拉取的完整节点列表，订阅站不可用时作为兜底缓存 |
 | `out/resolved.json` | 最近一次从页面解析出的订阅地址，页面改版或站点临时不可用时作为兜底 |
@@ -201,7 +209,9 @@ http://127.0.0.1:9898/best.yaml
 
 | 路径 | 方法 | 说明 |
 |---|---|---|
-| `/best.yaml` | GET | 当前最优订阅 |
+| `/best.yaml` | GET | Clash 格式订阅 |
+| `/best.txt` | GET | v2ray 格式订阅（base64 分享链接） |
+| `/best.links` | GET | 未编码的分享链接，一行一个 |
 | `/status` | GET | 最近一次巡检的统计信息（JSON） |
 | `/refresh` | POST | 立即触发一轮巡检 |
 
@@ -259,6 +269,8 @@ freeclash/
 │   │   ├── vmess.go         VMess AEAD + chunk stream
 │   │   └── ws.go            WebSocket 客户端（RFC 6455 子集）
 │   ├── sub/                 订阅拉取、解析、过滤、配置生成
+│   │   ├── sub.go           Clash 解析/生成、去重、地区识别
+│   │   └── links.go         分享链接渲染（ss / trojan / vmess）
 │   ├── site/                从分享站点页面解析精选订阅地址
 │   ├── probe/               TCP 预筛、隧道探测、排序
 │   └── server/              本地 HTTP 订阅服务

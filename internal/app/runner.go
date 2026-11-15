@@ -131,13 +131,27 @@ func (r *runner) refresh(ctx context.Context) error {
 		return err
 	}
 
+	// 同一批节点再输出一份 v2ray 系客户端能读的订阅（base64 分享链接）。
+	// Clash 的 YAML 只有 Clash 系客户端认，v2rayN / v2rayA 都不支持。
+	subData := sub.RenderSubscription(selected)
+	linksData := sub.PlainLinks(selected)
+	subPath := filepath.Join(r.cfg.OutputDir, "best.txt")
+	if err := os.WriteFile(subPath, subData, 0o644); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(r.cfg.OutputDir, "best.links"), linksData, 0o644); err != nil {
+		return err
+	}
+
 	if r.srv != nil {
 		r.srv.Update(server.Snapshot{
-			Config:    data,
-			Updated:   time.Now(),
-			Total:     len(nodes),
-			Available: available,
-			TopNodes:  topNames,
+			Config:       data,
+			Subscription: subData,
+			Links:        linksData,
+			Updated:      time.Now(),
+			Total:        len(nodes),
+			Available:    available,
+			TopNodes:     topNames,
 		})
 	}
 
@@ -146,7 +160,8 @@ func (r *runner) refresh(ctx context.Context) error {
 		"探测总数", len(nodes),
 		"可用", available,
 		"已输出", len(selected),
-		"配置", bestPath)
+		"配置", bestPath,
+		"v2ray 订阅", subPath)
 
 	for i, item := range top {
 		if i >= 10 {

@@ -146,11 +146,13 @@ func startHTTPServer(ctx context.Context, o Options, r *runner, logger *slog.Log
 		return nil
 	}
 	srv := server.New(o.Cfg.ServeAddr, r.refresh)
+	host := normalizeHost(o.Cfg.ServeAddr)
 	go func() {
 		logger.Info("订阅服务已启动",
 			"addr", o.Cfg.ServeAddr,
-			"订阅地址", "http://"+normalizeHost(o.Cfg.ServeAddr)+"/best.yaml",
-			"状态", "http://"+normalizeHost(o.Cfg.ServeAddr)+"/status")
+			"Clash 订阅", "http://"+host+"/best.yaml",
+			"v2ray 订阅", "http://"+host+"/best.txt",
+			"状态", "http://"+host+"/status")
 		if err := srv.Run(ctx); err != nil {
 			logger.Error("订阅服务退出", "err", err)
 		}
