@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -40,11 +41,13 @@ type Sample struct {
 
 // Result 是单个节点的探测结论。
 type Result struct {
-	Name       string   `json:"name"`
-	Type       string   `json:"type"`
-	Server     string   `json:"server"`
-	Port       int      `json:"port"`
-	Region     string   `json:"region"`
+	Name   string `json:"name"`
+	Type   string `json:"type"`
+	Server string `json:"server"`
+	Port   int    `json:"port"`
+	Region string `json:"region"`
+	// Source 是节点所属订阅的来源（域名），用于按来源配额挑选。
+	Source     string   `json:"source,omitempty"`
 	Success    int      `json:"success"`
 	Fail       int      `json:"fail"`
 	AvgLatency int64    `json:"avg_latency_ms"`
@@ -116,6 +119,7 @@ func Run(ctx context.Context, nodes []sub.Proxy, opts Options, logger *slog.Logg
 			Server: n.Server,
 			Port:   n.Port,
 			Region: sub.Region(n.Name),
+			Source: n.Source,
 			Node:   n,
 		}
 		if d, derr := proxy.New(n.Raw); derr != nil {
@@ -186,6 +190,10 @@ func Run(ctx context.Context, nodes []sub.Proxy, opts Options, logger *slog.Logg
 }
 
 // Refine 对排名靠前的候选节点追加多轮探测，降低单次抖动带来的误判。
+//
+// 复测会把节点结论清零重测，因此它比初测更怕本机断网：初测时通过、复测这十几秒里
+// 恰好断网，整批节点就会被判成不可用，一轮产出直接归零。为此复测前后都做一次不经过
+// 节点的直连自检，断网时宁可不复测，也不要拿错误的结论覆盖初测结果。
 func Refine(ctx context.Context, results []Result, topK, rounds int, opts Options, logger *slog.Logger) {
 	tgt, err := parseTarget(opts.ProbeURL)
 	if err != nil {
@@ -198,7 +206,18 @@ func Refine(ctx context.Context, results []Result, topK, rounds int, opts Option
 	if topK <= 0 {
 		return
 	}
+	if err := directCheck(ctx, tgt); err != nil {
+		logger.Warn("本机网络不可用，跳过二次复测", "err", shortErr(err))
+		return
+	}
 	logger.Info("开始二次复测", "节点数", topK, "轮数", rounds)
+
+	type snapshot struct{ success, fail, avg, min int64 }
+	before := make(map[*Result]snapshot, topK)
+	for i := 0; i < topK; i++ {
+		r := healthy[i]
+		before[r] = snapshot{int64(r.Success), int64(r.Fail), r.AvgLatency, r.MinLatency}
+	}
 
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, maxInt(8, opts.Concurrency/4))
@@ -228,6 +247,41 @@ func Refine(ctx context.Context, results []Result, topK, rounds int, opts Option
 		}(healthy[i])
 	}
 	wg.Wait()
+
+	// 复测把全部节点判死时，先确认是不是本机断了；是的话回滚到初测结论。
+	if ctx.Err() == nil && allFailed(healthy) {
+		if err := directCheck(ctx, tgt); err != nil {
+			logger.Warn("复测期间本机网络中断，沿用初测结论", "节点数", topK, "err", shortErr(err))
+			for r, s := range before {
+				r.Success, r.Fail = int(s.success), int(s.fail)
+				r.AvgLatency, r.MinLatency = s.avg, s.min
+				r.Samples = nil
+				r.healthy = r.Success > 0
+			}
+		}
+	}
+}
+
+func allFailed(list []*Result) bool {
+	for _, r := range list {
+		if r.Success > 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// directCheck 不经任何节点，直接连一次探测目标，用于判断本机网络是否正常。
+func directCheck(ctx context.Context, tgt target) error {
+	host, portStr, err := net.SplitHostPort(tgt.addr)
+	if err != nil {
+		return err
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return err
+	}
+	return tcpCheck(ctx, host, port, 3*time.Second)
 }
 
 func finalize(r *Result) {
@@ -280,6 +334,116 @@ func successRate(r Result) float64 {
 		return 0
 	}
 	return float64(r.Success) / float64(r.Success+r.Fail)
+}
+
+// Select 从已排序的可用节点中挑出 topN 个输出，并按来源分配名额。
+//
+// 为什么不直接取前 topN：节点的可用率与订阅规模无关，一份四五千节点的订阅可能只
+// 剩几个活的，而另一份几百节点的订阅能剩下几十个。若只按延迟排序取前 N，名额会被
+// 规模大、延迟低的来源占满（实测 30 个名额里曾有 19 个来自同一个 Telegram 频道，
+// 另一份订阅剩下的 6 个只有 1 个进榜），其它来源哪怕有可用节点也永远排在截断线外。
+// 同一来源的节点通常同批同质，全押一个来源等于整体可用性随该来源一起波动。
+//
+// 名额按「可用数量占比」分配，每个来源至少 1 个，单一来源不超过 capRatio 比例，
+// 剩余名额按质量顺序补齐，因此可用节点集中在少数来源时输出数量不会变少。
+func Select(ranked []*Result, topN int, capRatio float64) []*Result {
+	if topN <= 0 || len(ranked) <= topN {
+		return ranked
+	}
+	if capRatio <= 0 || capRatio >= 1 {
+		capRatio = 0.5
+	}
+	limit := int(math.Ceil(float64(topN) * capRatio))
+	if limit < 1 {
+		limit = 1
+	}
+
+	// 按来源分组，组内保持质量顺序（ranked 已排好）。
+	groups := make(map[string][]*Result, 16)
+	keys := make([]string, 0, 16)
+	for _, r := range ranked {
+		k := sourceKey(*r)
+		if _, ok := groups[k]; !ok {
+			keys = append(keys, k)
+		}
+		groups[k] = append(groups[k], r)
+	}
+
+	// 按可用数量占比分配名额。
+	quota := make(map[string]int, len(keys))
+	assigned := 0
+	for _, k := range keys {
+		q := int(math.Floor(float64(topN) * float64(len(groups[k])) / float64(len(ranked))))
+		if q < 1 {
+			q = 1
+		}
+		if q > limit {
+			q = limit
+		}
+		if q > len(groups[k]) {
+			q = len(groups[k])
+		}
+		quota[k] = q
+		assigned += q
+	}
+	// 还有名额时优先补给可用节点多、且未达上限的来源。
+	for assigned < topN {
+		best, bestLeft := "", 0
+		for _, k := range keys {
+			left := len(groups[k]) - quota[k]
+			if left <= 0 || quota[k] >= limit {
+				continue
+			}
+			if left > bestLeft {
+				best, bestLeft = k, left
+			}
+		}
+		if best == "" {
+			break
+		}
+		quota[best]++
+		assigned++
+	}
+
+	picked := make([]*Result, 0, topN)
+	seen := make(map[*Result]struct{}, topN)
+	for _, k := range keys {
+		for i := 0; i < quota[k] && i < len(groups[k]); i++ {
+			picked = append(picked, groups[k][i])
+			seen[groups[k][i]] = struct{}{}
+		}
+	}
+	// 配额未填满（可用节点集中在少数来源）时按质量顺序补齐，不浪费名额。
+	for _, r := range ranked {
+		if len(picked) >= topN {
+			break
+		}
+		if _, ok := seen[r]; ok {
+			continue
+		}
+		seen[r] = struct{}{}
+		picked = append(picked, r)
+	}
+
+	sort.SliceStable(picked, func(i, j int) bool {
+		si, sj := successRate(*picked[i]), successRate(*picked[j])
+		if si != sj {
+			return si > sj
+		}
+		return picked[i].AvgLatency < picked[j].AvgLatency
+	})
+	if len(picked) > topN {
+		picked = picked[:topN]
+	}
+	return picked
+}
+
+// sourceKey 返回用于配额分组的来源标识；未知来源归入同一组。
+func sourceKey(r Result) string {
+	if r.Source != "" {
+		return r.Source
+	}
+	return "unknown"
 }
 
 // probeOnce 通过节点建立隧道，向真实目标发起一次 HTTPS 请求，测量端到端耗时。

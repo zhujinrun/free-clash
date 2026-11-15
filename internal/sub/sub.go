@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"sort"
@@ -24,6 +25,32 @@ type Proxy struct {
 	Server string
 	Port   int
 	Raw    map[string]any
+
+	// Source 记录节点来自哪一份订阅（取订阅地址的域名）。
+	// 不写入 Raw，因此不会出现在输出给客户端的配置里；仅用于结果按来源配额挑选。
+	Source string
+}
+
+// TagSource 给一批节点标注来源，已经标注过的节点保持原样。
+func TagSource(nodes []Proxy, source string) []Proxy {
+	if source == "" {
+		return nodes
+	}
+	for i := range nodes {
+		if nodes[i].Source == "" {
+			nodes[i].Source = source
+		}
+	}
+	return nodes
+}
+
+// SourceOf 从订阅地址提取来源标识（域名），解析失败时退回原字符串。
+func SourceOf(rawURL string) string {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || u.Host == "" {
+		return rawURL
+	}
+	return u.Host
 }
 
 // Key 用于节点去重：同协议、同服务器、同端口且同凭证的重复节点只需保留一个。

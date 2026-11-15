@@ -54,3 +54,6 @@ ehthumbs.db
 .env.*
 *.prof
 coverage.txt
+
+# 临时排查脚本与样本
+/_tmp/

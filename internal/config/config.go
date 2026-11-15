@@ -80,6 +80,10 @@ type Config struct {
 	RefineRounds int `yaml:"refine_rounds"`
 	TopN         int `yaml:"top_n"`
 
+	// SourceCapRatio 限制单一订阅来源最多占 top_n 的比例（0.5 表示不超过一半），
+	// 避免规模大的订阅把名额占满、其它来源的可用节点被截断。填 1 表示不做限制。
+	SourceCapRatio float64 `yaml:"source_cap_ratio"`
+
 	// Include / Exclude 按节点名关键字过滤。
 	Include []string `yaml:"include"`
 	Exclude []string `yaml:"exclude"`
@@ -115,6 +119,7 @@ func Default() Config {
 		Rounds:             1,
 		RefineRounds:       3,
 		TopN:               30,
+		SourceCapRatio:     0.5,
 		OutputDir:          "out",
 		Interval:           Duration(30 * time.Minute),
 		PerRegionGroups:    6,

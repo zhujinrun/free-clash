@@ -109,9 +109,12 @@ func (r *runner) refresh(ctx context.Context) error {
 		return fmt.Errorf("本轮未发现任何可用节点（共探测 %d 个）", len(nodes))
 	}
 
-	top := ranked
-	if r.cfg.TopN > 0 && len(top) > r.cfg.TopN {
-		top = top[:r.cfg.TopN]
+	top := probe.Select(ranked, r.cfg.TopN, r.cfg.SourceCapRatio)
+	if len(top) < len(ranked) {
+		r.log.Info("按来源配额挑选",
+			"可用", len(ranked),
+			"输出", len(top),
+			"来源分布", sourceSummary(top))
 	}
 
 	selected := make([]sub.Proxy, 0, len(top))
@@ -226,7 +229,7 @@ func (r *runner) loadNodes(ctx context.Context) ([]sub.Proxy, error) {
 			continue
 		}
 		r.log.Info("订阅拉取成功", "源", src, "节点数", len(nodes))
-		all = append(all, nodes...)
+		all = append(all, sub.TagSource(nodes, sub.SourceOf(src))...)
 	}
 
 	if len(all) == 0 {
@@ -234,7 +237,7 @@ func (r *runner) loadNodes(ctx context.Context) ([]sub.Proxy, error) {
 		if data, err := os.ReadFile(cachePath); err == nil {
 			if nodes, perr := sub.Parse(data); perr == nil && len(nodes) > 0 {
 				r.log.Warn("全部订阅不可用，使用本地缓存", "节点数", len(nodes))
-				return nodes, nil
+				return sub.TagSource(nodes, "cache"), nil
 			}
 		}
 		return nil, fmt.Errorf("所有订阅均拉取失败: %s", strings.Join(errs, "; "))
@@ -323,7 +326,7 @@ func (r *runner) loadFromArticles(ctx context.Context) ([]sub.Proxy, error) {
 			continue
 		}
 		okCount++
-		all = append(all, res.Nodes...)
+		all = append(all, sub.TagSource(res.Nodes, sub.SourceOf(res.URL))...)
 	}
 	r.log.Info("文章订阅拉取完成",
 		"成功", okCount,
@@ -345,7 +348,7 @@ func (r *runner) loadFromSite(ctx context.Context) ([]sub.Proxy, error) {
 		if serr := r.cache.Save(r.cfg.Site, res.URL); serr != nil {
 			r.log.Debug("写解析缓存失败", "err", serr)
 		}
-		return res.Nodes, nil
+		return sub.TagSource(res.Nodes, sub.SourceOf(res.URL)), nil
 	}
 	r.log.Warn("站点解析失败", "站点", r.cfg.Site, "err", err)
 
@@ -362,7 +365,7 @@ func (r *runner) loadFromSite(ctx context.Context) ([]sub.Proxy, error) {
 		return nil, fmt.Errorf("%w；缓存的订阅地址解析失败: %v", err, perr)
 	}
 	r.log.Warn("已回退到上次解析出的订阅地址", "地址", cached, "节点数", len(nodes))
-	return nodes, nil
+	return sub.TagSource(nodes, sub.SourceOf(cached)), nil
 }
 
 func dedupe(in []sub.Proxy) []sub.Proxy {
@@ -420,4 +423,43 @@ func clip(s string, n int) string {
 		return s
 	}
 	return s[:n]
+}
+
+// sourceSummary 汇总本轮输出的来源构成，便于确认没有单一来源占满名额。
+func sourceSummary(top []*probe.Result) string {
+	counts := make(map[string]int, len(top))
+	for _, item := range top {
+		k := item.Source
+		if k == "" {
+			k = "unknown"
+		}
+		counts[k]++
+	}
+	list := make([]sourceCount, 0, len(counts))
+	for k, v := range counts {
+		list = append(list, sourceCount{k, v})
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].v != list[j].v {
+			return list[i].v > list[j].v
+		}
+		return list[i].k < list[j].k
+	})
+	var sb strings.Builder
+	for i, item := range list {
+		if i >= 6 {
+			sb.WriteString(" …")
+			break
+		}
+		if i > 0 {
+			sb.WriteString(" ")
+		}
+		fmt.Fprintf(&sb, "%s=%d", item.k, item.v)
+	}
+	return sb.String()
+}
+
+type sourceCount struct {
+	k string
+	v int
 }
